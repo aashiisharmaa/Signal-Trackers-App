@@ -8228,48 +8228,92 @@ public async Task<IActionResult> GetSitePredictionBase(
 
 [HttpGet, Route("GetSitePredictionOptimised")]
 public async Task<IActionResult> GetSitePredictionOptimised(
+    [FromQuery(Name = "node_b_id")] string? nodeBId = null,
     [FromQuery(Name = "cell_id")] string? cellId = null)
 {
-    if (string.IsNullOrWhiteSpace(cellId))
-        return BadRequest(new { Status = 0, Message = "cell_id is required." });
+    var nodeBIdFilter = (nodeBId ?? cellId)?.Trim();
+    if (string.IsNullOrWhiteSpace(nodeBIdFilter))
+        return BadRequest(new { Status = 0, Message = "node_b_id is required." });
 
     try
     {
-        const string tableName = "lte_prediction_optimised_results";
-        var trimmedCellId = cellId.Trim();
-        var query = db.lte_prediction_optimised_results
-            .AsNoTracking()
-            .Where(x => x.cell_id == trimmedCellId)
-            .OrderByDescending(x => x.id);
+        var conn = db.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open)
+            await conn.OpenAsync();
 
-        var items = await query
-            .Select(x => new
-            {
-                x.id,
-                x.project_id,
-                x.job_id,
-                x.site_id,
-                x.lat,
-                x.lon,
-                x.pred_rsrp,
-                x.pred_rsrq,
-                x.pred_sinr,
-                x.node_b_id,
-                x.cell_id,
-                operator_name = x.Operator,
-                x.created_at,
-                x.nodeb_id_cell_id
-            })
-            .ToListAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+SELECT 
+    id, project_id, job_id, lat, lon,
+    pred_rsrp, pred_rsrq, pred_sinr,
+    node_b_id, cell_id, operator, created_at,
+    NULL AS total_count
+FROM (
+    SELECT 
+        id, project_id, job_id, lat, lon,
+        pred_rsrp, pred_rsrq, pred_sinr,
+        node_b_id, cell_id, operator, created_at
+    FROM lte_prediction_optimised_results
+    WHERE node_b_id = @node_b_id
+
+    UNION ALL
+
+    SELECT 
+        b.id, b.project_id, b.job_id, b.lat, b.lon,
+        b.pred_rsrp, b.pred_rsrq, b.pred_sinr,
+        b.node_b_id, b.cell_id, b.operator, b.created_at
+    FROM lte_prediction_baseline_results b
+    WHERE b.node_b_id = @node_b_id
+      AND NOT EXISTS (
+          SELECT 1
+          FROM lte_prediction_optimised_results o
+          WHERE o.node_b_id = @node_b_id
+      )
+) AS final_data
+
+UNION ALL
+
+SELECT 
+    NULL,NULL,NULL,NULL,NULL,
+    NULL,NULL,NULL,
+    NULL,NULL,NULL,NULL,
+    COUNT(*) AS total_count
+FROM (
+    SELECT id
+    FROM lte_prediction_optimised_results
+    WHERE node_b_id = @node_b_id
+
+    UNION ALL
+
+    SELECT b.id
+    FROM lte_prediction_baseline_results b
+    WHERE b.node_b_id = @node_b_id
+      AND NOT EXISTS (
+          SELECT 1
+          FROM lte_prediction_optimised_results o
+          WHERE o.node_b_id = @node_b_id
+      )
+) AS count_data;";
+
+        Add(cmd, "@node_b_id", nodeBIdFilter);
+
+        var rows = new List<Dictionary<string, object?>>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < reader.FieldCount; i++)
+                row[reader.GetName(i)] = await reader.IsDBNullAsync(i) ? null : reader.GetValue(i);
+
+            rows.Add(row);
+        }
 
         return Ok(new
         {
             Status = 1,
-            Table = tableName,
-            CellIdFiltered = trimmedCellId,
-            Total = items.Count,
-            Count = items.Count,
-            Data = items
+            NodeBIdFiltered = nodeBIdFilter,
+            Count = rows.Count,
+            Data = rows
         });
     }
     catch (Exception ex)
