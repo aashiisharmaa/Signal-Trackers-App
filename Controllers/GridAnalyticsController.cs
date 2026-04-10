@@ -216,9 +216,10 @@ namespace SignalTracker.Controllers
                     }
 
                     // ── 5. FETCH PREDICTION DATA (raw ADO.NET) ──
-                    // Compute should include all sectors available in baseline + optimized for this project.
-                    var baselinePts = await FetchPredictionData(conn, "lte_prediction_baseline_results", projectId);
-                    var optimizedPts = await FetchPredictionData(conn, "lte_prediction_optimised_results", projectId);
+                    // Use optimized + baseline-only logic similar to GetSitePredictionOptimised.
+                    // Baseline rows are included only when there is no matching optimized row for the same node_b_id + cell_id.
+                    var baselinePts = await FetchPredictionData(conn, "lte_prediction_baseline_results", projectId, excludeIfOptimized: true);
+                    var optimizedPts = await FetchPredictionData(conn, "lte_prediction_optimised_results", projectId, excludeIfOptimized: false);
                     var allPredictionPts = baselinePts.Concat(optimizedPts).ToList();
                     if (allPredictionPts.Count == 0)
                     {
@@ -1065,11 +1066,28 @@ namespace SignalTracker.Controllers
             return inside;
         }
 
-        private async Task<List<PredPoint>> FetchPredictionData(DbConnection conn, string table, int projectId)
+        private async Task<List<PredPoint>> FetchPredictionData(DbConnection conn, string table, int projectId, bool excludeIfOptimized)
         {
             var pts = new List<PredPoint>();
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"SELECT lat, lon, pred_rsrp, pred_rsrq, pred_sinr FROM `{table}` WHERE project_id = @pid";
+            if (excludeIfOptimized && string.Equals(table, "lte_prediction_baseline_results", StringComparison.OrdinalIgnoreCase))
+            {
+                cmd.CommandText = @"
+SELECT b.lat, b.lon, b.pred_rsrp, b.pred_rsrq, b.pred_sinr
+FROM lte_prediction_baseline_results b
+WHERE b.project_id = @pid
+  AND NOT EXISTS (
+      SELECT 1
+      FROM lte_prediction_optimised_results o
+      WHERE o.project_id = b.project_id
+        AND COALESCE(o.node_b_id, '') = COALESCE(b.node_b_id, '')
+        AND COALESCE(o.cell_id, '') = COALESCE(b.cell_id, '')
+  );";
+            }
+            else
+            {
+                cmd.CommandText = $"SELECT lat, lon, pred_rsrp, pred_rsrq, pred_sinr FROM `{table}` WHERE project_id = @pid";
+            }
             AddParam(cmd, "@pid", projectId);
             await using var rdr = await cmd.ExecuteReaderAsync();
             while (await rdr.ReadAsync())
