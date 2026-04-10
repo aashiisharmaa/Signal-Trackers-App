@@ -1389,6 +1389,9 @@ public bool ProcessSitePredictionSheet(
 
             foreach (var row in records)
             {
+                var parsedCellId = ParseCompositeCellId(row.cell_id);
+                var parsedSecId = TryInt(row.sec_id) ?? TryInt(row.sector) ?? parsedCellId;
+
                 var temp = new site_prediction
                 {
                     earfcn = TryInt(row.earfcn),
@@ -1405,8 +1408,8 @@ public bool ProcessSitePredictionSheet(
                     site_name = TryInt(row.site_name),
                     sector = row.sector,
 
-                    cell_id = TryInt(row.cell_id),
-                    sec_id = TryInt(row.sec_id),
+                    cell_id = parsedCellId,
+                    sec_id = parsedSecId,
 
                     longitude = TryDouble(row.longitude),
                     latitude = TryDouble(row.latitude),
@@ -1590,6 +1593,20 @@ public bool ProcessSitePredictionSheet(
 
         private static int? TryInt(string? v) => int.TryParse(v, NumberStyles.Any, CultureInfo.InvariantCulture, out var x) ? x : (int?)null;
         private static double? TryDouble(string? v) => double.TryParse(v, NumberStyles.Any, CultureInfo.InvariantCulture, out var x) ? x : (double?)null;
+        private static int? ParseCompositeCellId(string? value)
+        {
+            var direct = TryInt(value);
+            if (direct.HasValue) return direct;
+
+            var raw = (value ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+
+            var parts = raw.Split('_', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (parts.Length == 0) return null;
+
+            var suffix = parts[^1];
+            return TryInt(suffix);
+        }
 
         private float? ParseFloat(string? value) => float.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var r) ? r : (float?)null;
         private double? ParseDouble(string? value) => double.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var r) ? r : (double?)null;
