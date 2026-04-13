@@ -84,6 +84,10 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
                 .SetApplicationName("SignalTracker");
         }
 
+        // Ensure the upload root exists both at runtime and in the deployed app.
+        var uploadedExcelsPath = Path.Combine(builder.Environment.ContentRootPath, "UploadedExcels");
+        Directory.CreateDirectory(uploadedExcelsPath);
+
         // ----------------------------------------------------
         // REDIS CONFIGURATION (Safe + Fallback)
         // ----------------------------------------------------

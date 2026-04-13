@@ -11,8 +11,8 @@
 node_modules/
 dist/
 
-UploadedExcels/
+UploadedExcels/*
+!UploadedExcels/.gitkeep
 
 bin/
 obj/
-UploadedExcels/
