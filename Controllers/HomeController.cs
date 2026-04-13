@@ -10,6 +10,7 @@ using System.Security.Claims;
 using SignalTracker.Helper;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Caching.Memory;
+using SignalTracker.Services;
 
 namespace SignalTracker.Controllers
 {
@@ -93,7 +94,7 @@ namespace SignalTracker.Controllers
 
         private async Task<UserLite?> GetUserForLoginTw(string emailNormalized)
         {
-            var twConnectionString = _configuration.GetConnectionString("MySqlConnection2");
+            var twConnectionString = MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection2"));
             if (string.IsNullOrWhiteSpace(twConnectionString))
                 return null;
 

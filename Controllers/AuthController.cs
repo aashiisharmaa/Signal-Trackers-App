@@ -12,6 +12,7 @@ using Microsoft.Extensions.Configuration;
 
 using SignalTracker.Models; 
 using Microsoft.Extensions.Caching.Memory;
+using SignalTracker.Services;
 
 namespace SignalTracker.Controllers
 {
@@ -44,7 +45,7 @@ namespace SignalTracker.Controllers
 
         private async Task<LoginUserDto?> FindTwUserAsync(string email, string password)
         {
-            var twConnectionString = _configuration.GetConnectionString("MySqlConnection2");
+            var twConnectionString = MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection2"));
             if (string.IsNullOrWhiteSpace(twConnectionString))
                 return null;
 

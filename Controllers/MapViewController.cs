@@ -5644,8 +5644,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
             if (site.HasValue) filters.Add($"{siteExpr} = @site");
             if (cellId.HasValue) filters.Add($"{cellExpr} = @cell");
-            if (!string.IsNullOrWhiteSpace(cluster)) filters.Add($"{clusterExpr} = @clus");
-            if (!string.IsNullOrWhiteSpace(technology)) filters.Add($"{technologyExpr} = @tech");
+            if (!string.IsNullOrWhiteSpace(cluster)) filters.Add(BuildUnicodeTextEquality(clusterExpr, "@clus"));
+            if (!string.IsNullOrWhiteSpace(technology)) filters.Add(BuildUnicodeTextEquality(technologyExpr, "@tech"));
             if (band.HasValue) filters.Add($"{bandExpr} = @band");
             if (pci.HasValue) filters.Add($"{pciExpr} = @pci");
 
@@ -5686,12 +5686,12 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
             if (!string.IsNullOrWhiteSpace(cluster))
             {
-                filters.Add($"(({updatedClusterExpr} = @clus) OR ({originalClusterExpr} = @clus))");
+                filters.Add($"(({BuildUnicodeTextEquality(updatedClusterExpr, "@clus")}) OR ({BuildUnicodeTextEquality(originalClusterExpr, "@clus")}))");
             }
 
             if (!string.IsNullOrWhiteSpace(technology))
             {
-                filters.Add($"(({updatedTechnologyExpr} = @tech) OR ({originalTechnologyExpr} = @tech))");
+                filters.Add($"(({BuildUnicodeTextEquality(updatedTechnologyExpr, "@tech")}) OR ({BuildUnicodeTextEquality(originalTechnologyExpr, "@tech")}))");
             }
 
             if (band.HasValue)
@@ -5705,6 +5705,14 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             }
 
             return filters.Count == 0 ? string.Empty : " AND " + string.Join(" AND ", filters);
+        }
+
+        private static string BuildUnicodeTextEquality(string columnExpr, string parameterName)
+        {
+            static string Normalize(string expr) =>
+                $"CONVERT({expr} USING utf8mb4) COLLATE utf8mb4_unicode_ci";
+
+            return $"{Normalize(columnExpr)} = {Normalize(parameterName)}";
         }
 
         private static void AddSitePredictionFilterParameters(
@@ -5722,49 +5730,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             if (!string.IsNullOrWhiteSpace(technology)) Add(cmd, "@tech", technology.Trim());
             if (band.HasValue) Add(cmd, "@band", band.Value);
             if (pci.HasValue) Add(cmd, "@pci", pci.Value);
-        }
-
-        private async Task EnsureSitePredictionOptimizedTableAsync(DbConnection conn)
-        {
-            await using (var createCmd = conn.CreateCommand())
-            {
-                createCmd.CommandText = "CREATE TABLE IF NOT EXISTS site_prediction_optimized LIKE site_prediction;";
-                await createCmd.ExecuteNonQueryAsync();
-            }
-
-            var requiredColumns = new (string Name, string Definition)[]
-            {
-                ("site_prediction_id", "INT NULL"),
-                ("is_updated", "TINYINT(1) NOT NULL DEFAULT 1"),
-                ("version", "INT NOT NULL DEFAULT 1"),
-                ("status", "VARCHAR(20) NULL DEFAULT 'updated'"),
-                ("created_at", "DATETIME NULL"),
-                ("updated_at", "DATETIME NULL"),
-                ("updated_by", "VARCHAR(255) NULL")
-            };
-
-            foreach (var column in requiredColumns)
-            {
-                await using var existsCmd = conn.CreateCommand();
-                existsCmd.CommandText = @"
-                    SELECT COUNT(*)
-                    FROM INFORMATION_SCHEMA.COLUMNS
-                    WHERE TABLE_SCHEMA = DATABASE()
-                      AND TABLE_NAME = 'site_prediction_optimized'
-                      AND COLUMN_NAME = @columnName;";
-                Add(existsCmd, "@columnName", column.Name);
-
-                var existsObj = await existsCmd.ExecuteScalarAsync();
-                var exists = existsObj != null && existsObj != DBNull.Value && Convert.ToInt32(existsObj) > 0;
-                if (exists)
-                {
-                    continue;
-                }
-
-                await using var alterCmd = conn.CreateCommand();
-                alterCmd.CommandText = $"ALTER TABLE site_prediction_optimized ADD COLUMN {column.Name} {column.Definition};";
-                await alterCmd.ExecuteNonQueryAsync();
-            }
         }
 
         private static async Task<HashSet<string>> GetTableColumnSetAsync(DbConnection conn, string tableName)
@@ -5847,7 +5812,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] string? technology = null,
             [FromQuery] int? band = null,
             [FromQuery] int? pci = null,
-            [FromQuery] int limit = 200,
+            [FromQuery] int limit = 1000,
             [FromQuery] int offset = 0,
             [FromQuery] string version = "combined")
         {
@@ -5868,11 +5833,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             var conn = db.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
                 await conn.OpenAsync();
-
-            if (requestedVersion == "combined")
-            {
-                await EnsureSitePredictionOptimizedTableAsync(conn);
-            }
 
             await using var cmd = conn.CreateCommand();
             var filterClause = requestedVersion == "combined"
@@ -5958,7 +5918,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                             OR (
                                 (o.site_prediction_id IS NULL OR o.site_prediction_id = 0 OR o.site_prediction_id = o.tbl_project_id)
                                 AND (
-                                    (o.cell_id IS NOT NULL AND sp.cell_id IS NOT NULL AND o.cell_id = sp.cell_id)
+                                    (o.cell_id IS NOT NULL AND sp.cell_id IS NOT NULL AND
+                                        CONVERT(o.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                        CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
                                     OR (
                                         o.site IS NOT NULL
                                         AND sp.site IS NOT NULL
@@ -6072,7 +6034,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             if (conn.State != System.Data.ConnectionState.Open)
                 await conn.OpenAsync();
 
-            await EnsureSitePredictionOptimizedTableAsync(conn);
             var sourceColumns = await GetTableColumnSetAsync(conn, "site_prediction");
             var optimizedColumns = await GetTableColumnSetAsync(conn, "site_prediction_optimized");
             var optimizedOnlyColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -6142,7 +6103,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                             OR (
                                 (o.site_prediction_id IS NULL OR o.site_prediction_id = 0 OR o.site_prediction_id = o.tbl_project_id)
                                 AND (
-                                    (o.cell_id IS NOT NULL AND sp.cell_id IS NOT NULL AND o.cell_id = sp.cell_id)
+                                    (o.cell_id IS NOT NULL AND sp.cell_id IS NOT NULL AND
+                                        CONVERT(o.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                        CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
                                     OR (
                                         o.site IS NOT NULL
                                         AND sp.site IS NOT NULL
@@ -6258,7 +6221,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 if (conn.State != System.Data.ConnectionState.Open)
                     await conn.OpenAsync();
 
-                await EnsureSitePredictionOptimizedTableAsync(conn);
                 var sourceColumns = await GetTableColumnSetAsync(conn, "site_prediction");
                 var optimizedColumns = await GetTableColumnSetAsync(conn, "site_prediction_optimized");
                 var reservedOptimizedColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -6650,8 +6612,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 var conn = db.Database.GetDbConnection();
                 if (conn.State != ConnectionState.Open)
                     await conn.OpenAsync();
-
-                await EnsureSitePredictionOptimizedTableAsync(conn);
 
                 if (optimizedOnly)
                 {

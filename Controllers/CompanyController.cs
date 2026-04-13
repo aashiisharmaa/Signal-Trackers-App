@@ -187,6 +187,7 @@ namespace SignalTracker.Controllers
                         try
                         {
                             var secondaryConnectionString = _configuration.GetConnectionString("MySqlConnection2");
+                            secondaryConnectionString = MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(secondaryConnectionString);
                             if (!string.IsNullOrEmpty(secondaryConnectionString))
                             {
                                 var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();

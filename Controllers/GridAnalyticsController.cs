@@ -784,7 +784,9 @@ namespace SignalTracker.Controllers
                                     OR (
                                         (o.site_prediction_id IS NULL OR o.site_prediction_id = 0 OR o.site_prediction_id = o.tbl_project_id)
                                         AND (
-                                            (o.cell_id IS NOT NULL AND sp.cell_id IS NOT NULL AND o.cell_id = sp.cell_id)
+                                            (o.cell_id IS NOT NULL AND sp.cell_id IS NOT NULL AND
+                                                CONVERT(o.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                                CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
                                             OR (
                                                 o.site IS NOT NULL
                                                 AND sp.site IS NOT NULL

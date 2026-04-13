@@ -1,3 +1,5 @@
+using MySqlConnector;
+
 namespace SignalTracker.Services
 {
     public interface IDbConnectionProvider
@@ -31,7 +33,7 @@ namespace SignalTracker.Services
         {
             var context = _httpContextAccessor.HttpContext;
             if (context == null)
-                return _configuration.GetConnectionString("MySqlConnection");
+                return MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection"));
 
             var path = (context.Request.Path.Value ?? string.Empty).ToLowerInvariant();
 
@@ -40,7 +42,7 @@ namespace SignalTracker.Services
                 path.Contains("/api/auth/login") ||
                 path.Contains("/home/getloggeduser"))
             {
-                return _configuration.GetConnectionString("MySqlConnection");
+                return MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection"));
             }
 
             // User management write-paths are always sourced from MainDB.
@@ -49,7 +51,7 @@ namespace SignalTracker.Services
             // and get incorrectly pinned to Main DB.
             if (Array.Exists(MainDbOnlyAdminPaths, p => string.Equals(path, p, StringComparison.OrdinalIgnoreCase)))
             {
-                return _configuration.GetConnectionString("MySqlConnection");
+                return MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection"));
             }
 
             // Explicit override for diagnostics/manual API testing
@@ -80,10 +82,27 @@ namespace SignalTracker.Services
 
             if (string.Equals(country, "TW", StringComparison.OrdinalIgnoreCase))
             {
-                return _configuration.GetConnectionString("MySqlConnection2");
+                return MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection2"));
             }
 
-            return _configuration.GetConnectionString("MySqlConnection");
+            return MySqlConnectionStringHelper.EnsureZeroDateTimeHandling(_configuration.GetConnectionString("MySqlConnection"));
+        }
+    }
+
+    internal static class MySqlConnectionStringHelper
+    {
+        public static string EnsureZeroDateTimeHandling(string? connectionString)
+        {
+            if (string.IsNullOrWhiteSpace(connectionString))
+                return string.Empty;
+
+            var builder = new MySqlConnectionStringBuilder(connectionString)
+            {
+                ["Allow Zero DateTime"] = true,
+                ["Convert Zero DateTime"] = true
+            };
+
+            return builder.ConnectionString;
         }
     }
 }
