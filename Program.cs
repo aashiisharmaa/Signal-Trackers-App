@@ -21,6 +21,7 @@ internal class Program
 
         // Add this line to Program.cs
         builder.Services.AddScoped<UserScopeService>();
+        builder.Services.AddScoped<LicenseFeatureService>();
         builder.Services.AddScoped<PythonBridgeService>();
 
 

@@ -23,8 +23,15 @@ namespace SignalTracker.Controllers
         private readonly IConfiguration _configuration;
         private readonly IMemoryCache _cache;
         private readonly IHttpContextAccessor _httpContextAccessor;
+        private readonly LicenseFeatureService _licenseFeatureService;
 
-        public HomeController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor, ILogger<HomeController> logger, IConfiguration configuration, IMemoryCache cache)
+        public HomeController(
+            ApplicationDbContext context,
+            IHttpContextAccessor httpContextAccessor,
+            ILogger<HomeController> logger,
+            IConfiguration configuration,
+            IMemoryCache cache,
+            LicenseFeatureService licenseFeatureService)
         {
             _db = context;
             _cf = new CommonFunction(context, httpContextAccessor);
@@ -32,6 +39,7 @@ namespace SignalTracker.Controllers
             _configuration = configuration;
             _cache = cache;
             _httpContextAccessor = httpContextAccessor;
+            _licenseFeatureService = licenseFeatureService;
         }
 
         [HttpGet("")]
@@ -208,11 +216,21 @@ namespace SignalTracker.Controllers
                 HttpContext.Session.SetString("country_code", resolvedCountryCode);
 
                 _cache.Set($"active_session_{user.id}", true, DateTimeOffset.UtcNow.AddHours(5));
+                var enabledFeatures = await _licenseFeatureService.GetEnabledFeaturesForUserAsync(user.id);
 
                 return Json(new
                 {
                     success = true,
-                    user = new { user.id, user.name, email = user.email, user.m_user_type_id, user.company_id, user.country_code },
+                    user = new
+                    {
+                        user.id,
+                        user.name,
+                        email = user.email,
+                        user.m_user_type_id,
+                        user.company_id,
+                        user.country_code,
+                        enabled_features = enabledFeatures
+                    },
                     source_db = loginSource,
                     message = "Login successful!"
                 });

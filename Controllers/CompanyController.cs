@@ -17,12 +17,18 @@ namespace SignalTracker.Controllers
     {
         private readonly ApplicationDbContext _db;
         private readonly UserScopeService _userScope;
+        private readonly LicenseFeatureService _licenseFeatureService;
         private readonly IConfiguration _configuration;
 
-        public CompanyController(ApplicationDbContext db, UserScopeService userScope, IConfiguration configuration)
+        public CompanyController(
+            ApplicationDbContext db,
+            UserScopeService userScope,
+            LicenseFeatureService licenseFeatureService,
+            IConfiguration configuration)
         {
             _db = db;
             _userScope = userScope;
+            _licenseFeatureService = licenseFeatureService;
             _configuration = configuration;
         }
 
@@ -648,10 +654,37 @@ public async Task<IActionResult> GetUsedLicenses(
             .OrderByDescending(x => x.created_on)
             .ToListAsync();
 
+        var licenseIds = data.Select(x => x.license_id).ToList();
+        var featuresByLicenseId = await _licenseFeatureService.GetFeaturesForLicenseIdsAsync(licenseIds);
+
+        var enriched = data.Select(x =>
+        {
+            var features = featuresByLicenseId.TryGetValue(x.license_id, out var vals)
+                ? vals
+                : new List<string>();
+            return new
+            {
+                x.license_id,
+                x.license_code,
+                x.valid_till,
+                x.created_on,
+                x.license_status,
+                x.user_id,
+                x.user_name,
+                x.user_email,
+                x.user_mobile,
+                x.user_isactive,
+                x.company_id,
+                x.company_name,
+                feature_codes = string.Join(",", features),
+                enabled_features = features
+            };
+        }).ToList();
+
         return Ok(new
         {
             Status = 1,
-            Data = data
+            Data = enriched
         });
     }
     catch (Exception ex)
@@ -942,8 +975,26 @@ public async Task<IActionResult> UpdateIssuedLicense([FromQuery] int licenseId, 
         if (request == null)
             return BadRequest(new { Status = 0, Message = "Invalid request data" });
 
-        if (!request.valid_till.HasValue && !request.status.HasValue)
-            return BadRequest(new { Status = 0, Message = "Provide at least one field: valid_till or status" });
+        var hasFeaturePayload =
+            request.features != null ||
+            request.feature_list != null ||
+            request.enabled_features != null ||
+            request.permissions != null ||
+            request.feature_codes != null ||
+            request.features_csv != null;
+
+        var requestedFeatures = LicenseFeatureService.ExtractFeaturesFromRequest(
+            features: request.features,
+            featureList: request.feature_list,
+            enabledFeatures: request.enabled_features,
+            permissions: request.permissions,
+            featureCodes: request.feature_codes,
+            featuresCsv: request.features_csv);
+        if (hasFeaturePayload && requestedFeatures == null)
+            requestedFeatures = new List<string>();
+
+        if (!request.valid_till.HasValue && !request.status.HasValue && !hasFeaturePayload)
+            return BadRequest(new { Status = 0, Message = "Provide at least one field: valid_till or status or features" });
 
         int targetCompanyId = _userScope.GetTargetCompanyId(User, null);
 
@@ -970,6 +1021,12 @@ public async Task<IActionResult> UpdateIssuedLicense([FromQuery] int licenseId, 
 
         await _db.SaveChangesAsync();
 
+        if (requestedFeatures != null)
+            await _licenseFeatureService.UpsertLicenseFeaturesAsync(license.id, requestedFeatures);
+
+        var enabledFeatures = await _licenseFeatureService.GetFeaturesForLicenseIdsAsync(new[] { license.id });
+        var features = enabledFeatures.TryGetValue(license.id, out var list) ? list : new List<string>();
+
         return Ok(new
         {
             Status = 1,
@@ -982,7 +1039,9 @@ public async Task<IActionResult> UpdateIssuedLicense([FromQuery] int licenseId, 
                 license.license_code,
                 license.valid_till,
                 license.status,
-                license.created_on
+                license.created_on,
+                feature_codes = string.Join(",", features),
+                enabled_features = features
             }
         });
     }
@@ -1013,5 +1072,11 @@ public class UpdateIssuedLicenseRequest
 {
     public DateTime? valid_till { get; set; }
     public int? status { get; set; }
+    public List<string>? features { get; set; }
+    public List<string>? feature_list { get; set; }
+    public List<string>? enabled_features { get; set; }
+    public List<string>? permissions { get; set; }
+    public string? feature_codes { get; set; }
+    public string? features_csv { get; set; }
 }
 }}

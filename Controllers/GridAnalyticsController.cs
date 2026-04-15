@@ -5,6 +5,7 @@ using System.Data.Common;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Security.Claims;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
@@ -23,16 +24,40 @@ namespace SignalTracker.Controllers
         private readonly ApplicationDbContext _db;
         private readonly RedisService _redis;
         private readonly UserScopeService _userScope;
+        private readonly LicenseFeatureService _licenseFeatureService;
         private const double METERS_PER_DEGREE_LAT = 111320.0;
 
         public GridAnalyticsController(
             ApplicationDbContext context,
             RedisService redis,
-            UserScopeService userScope)
+            UserScopeService userScope,
+            LicenseFeatureService licenseFeatureService)
         {
             _db = context;
             _redis = redis;
             _userScope = userScope;
+            _licenseFeatureService = licenseFeatureService;
+        }
+
+        private int GetCurrentUserId()
+        {
+            var raw = User.FindFirstValue("UserId");
+            return int.TryParse(raw, out var uid) ? uid : 0;
+        }
+
+        private async Task<bool> CanUseGridFeatureAsync()
+        {
+            if (_userScope.IsSuperAdmin(User))
+                return true;
+
+            var userId = GetCurrentUserId();
+            if (userId <= 0)
+                return false;
+
+            return await _licenseFeatureService.HasFeatureAccessAsync(
+                userId,
+                LicenseFeatureService.FeatureGridFetch,
+                defaultAllow: false);
         }
 
         // =====================================================================
@@ -46,6 +71,9 @@ namespace SignalTracker.Controllers
             [FromQuery] int? regionId = null,
             [FromQuery] int? company_id = null)
         {
+            if (!await CanUseGridFeatureAsync())
+                return StatusCode(403, new { Status = 0, Message = "Feature disabled in license: grid_fetch", Code = "FEATURE_NOT_ENABLED" });
+
             var sw = Stopwatch.StartNew();
 
             // ── 1. AUTH & COMPANY SCOPING ──
@@ -456,6 +484,9 @@ namespace SignalTracker.Controllers
             [FromQuery] double gridSize,
             [FromQuery] int? company_id = null)
         {
+            if (!await CanUseGridFeatureAsync())
+                return StatusCode(403, new { Status = 0, Message = "Feature disabled in license: grid_fetch", Code = "FEATURE_NOT_ENABLED" });
+
             int targetCompanyId = _userScope.GetTargetCompanyId(User, company_id);
             bool isSuperAdmin = _userScope.IsSuperAdmin(User);
             if (!isSuperAdmin && targetCompanyId == 0)
@@ -506,6 +537,9 @@ namespace SignalTracker.Controllers
             [FromQuery] int? regionId = null,
             [FromQuery] int? company_id = null)
         {
+            if (!await CanUseGridFeatureAsync())
+                return StatusCode(403, new { Status = 0, Message = "Feature disabled in license: grid_fetch", Code = "FEATURE_NOT_ENABLED" });
+
             var sw = Stopwatch.StartNew();
 
             // Auth & Scoping
@@ -628,6 +662,9 @@ namespace SignalTracker.Controllers
             [FromQuery] int projectId,
             [FromQuery] int? company_id = null)
         {
+            if (!await CanUseGridFeatureAsync())
+                return StatusCode(403, new { Status = 0, Message = "Feature disabled in license: grid_fetch", Code = "FEATURE_NOT_ENABLED" });
+
             var sw = Stopwatch.StartNew();
 
             int targetCompanyId = _userScope.GetTargetCompanyId(User, company_id);

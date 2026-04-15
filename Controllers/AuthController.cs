@@ -24,13 +24,20 @@ namespace SignalTracker.Controllers
         private readonly ILogger<AuthController> _logger;
         private readonly IConfiguration _configuration;
         private readonly IMemoryCache _cache;
+        private readonly LicenseFeatureService _licenseFeatureService;
 
-        public AuthController(ApplicationDbContext db, ILogger<AuthController> logger, IConfiguration configuration, IMemoryCache cache)
+        public AuthController(
+            ApplicationDbContext db,
+            ILogger<AuthController> logger,
+            IConfiguration configuration,
+            IMemoryCache cache,
+            LicenseFeatureService licenseFeatureService)
         {
             _db = db;
             _logger = logger;
             _configuration = configuration;
             _cache = cache;
+            _licenseFeatureService = licenseFeatureService;
         }
 
         private sealed class LoginUserDto
@@ -149,7 +156,24 @@ namespace SignalTracker.Controllers
 
             _cache.Set($"active_session_{user.id}", true, DateTimeOffset.UtcNow.AddHours(5));
 
-            return Ok(new { message = "Login successful", country = resolvedCountryCode, source_db = loginSource });
+            var enabledFeatures = await _licenseFeatureService.GetEnabledFeaturesForUserAsync(user.id);
+
+            return Ok(new
+            {
+                message = "Login successful",
+                country = resolvedCountryCode,
+                source_db = loginSource,
+                user = new
+                {
+                    user.id,
+                    user.email,
+                    user.name,
+                    user.m_user_type_id,
+                    user.company_id,
+                    user.country_code,
+                    enabled_features = enabledFeatures
+                }
+            });
         }
 
         [Authorize]
@@ -169,11 +193,14 @@ namespace SignalTracker.Controllers
                     name = u.name,
                     email = u.email,
                     m_user_type_id = u.m_user_type_id,
-                    country_code = u.country_code // Added to DTO
+                    country_code = u.country_code, // Added to DTO
+                    company_id = u.company_id
                 })
                 .FirstOrDefaultAsync(ct);
 
             if (user is null) return NotFound();
+
+            user.enabled_features = await _licenseFeatureService.GetEnabledFeaturesForUserAsync(user.id, ct);
 
             return Ok(new AuthStatusResponse { user = user });
         }
@@ -209,5 +236,7 @@ namespace SignalTracker.Controllers
         public string email { get; set; } = default!;
         public int m_user_type_id { get; set; }
         public string? country_code { get; set; } // Added this field
+        public int? company_id { get; set; }
+        public List<string> enabled_features { get; set; } = new();
     }
 }
