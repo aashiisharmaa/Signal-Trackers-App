@@ -25,6 +25,7 @@ internal class Program
 
 
         builder.Services.AddHttpContextAccessor();
+        builder.Services.AddMemoryCache();
         builder.Services.AddControllersWithViews()
             .AddJsonOptions(o =>
             {

@@ -5566,8 +5566,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
         cmd.Transaction = tx;
 
         Add(cmd, "@site",    ToInt(cols[idxSite]));
-        Add(cmd, "@sector",  cols[idxSector]);
-        Add(cmd, "@cell_id", ToInt(cols[idxCellId]));
+        Add(cmd, "@sector",  ToInt(cols[idxSector]));
+        Add(cmd, "@cell_id", cols[idxCellId]);
         Add(cmd, "@lon",     ToDouble(cols[idxLon]));
         Add(cmd, "@lat",     ToDouble(cols[idxLat]));
         Add(cmd, "@pci",     ToInt(cols[idxPci]));
@@ -5628,7 +5628,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
         private static string BuildSitePredictionFilterClause(
             int? site,
-            int? cellId,
+            string? cellId,
             string? cluster,
             string? technology,
             int? band,
@@ -5643,9 +5643,9 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             var filters = new List<string>();
 
             if (site.HasValue) filters.Add($"{siteExpr} = @site");
-            if (cellId.HasValue) filters.Add($"{cellExpr} = @cell");
-            if (!string.IsNullOrWhiteSpace(cluster)) filters.Add(BuildUnicodeTextEquality(clusterExpr, "@clus"));
-            if (!string.IsNullOrWhiteSpace(technology)) filters.Add(BuildUnicodeTextEquality(technologyExpr, "@tech"));
+            if (!string.IsNullOrWhiteSpace(cellId)) filters.Add($"CONVERT({cellExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @cell");
+            if (!string.IsNullOrWhiteSpace(cluster)) filters.Add($"CONVERT({clusterExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @clus");
+            if (!string.IsNullOrWhiteSpace(technology)) filters.Add($"CONVERT({technologyExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @tech");
             if (band.HasValue) filters.Add($"{bandExpr} = @band");
             if (pci.HasValue) filters.Add($"{pciExpr} = @pci");
 
@@ -5654,7 +5654,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
         private static string BuildSitePredictionDualFilterClause(
             int? site,
-            int? cellId,
+            string? cellId,
             string? cluster,
             string? technology,
             int? band,
@@ -5679,19 +5679,19 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 filters.Add($"(({updatedSiteExpr} = @site) OR ({originalSiteExpr} = @site))");
             }
 
-            if (cellId.HasValue)
+            if (!string.IsNullOrWhiteSpace(cellId))
             {
-                filters.Add($"(({updatedCellExpr} = @cell) OR ({originalCellExpr} = @cell))");
+                filters.Add($"((CONVERT({updatedCellExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @cell) OR (CONVERT({originalCellExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @cell))");
             }
 
             if (!string.IsNullOrWhiteSpace(cluster))
             {
-                filters.Add($"(({BuildUnicodeTextEquality(updatedClusterExpr, "@clus")}) OR ({BuildUnicodeTextEquality(originalClusterExpr, "@clus")}))");
+                filters.Add($"((CONVERT({updatedClusterExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @clus) OR (CONVERT({originalClusterExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @clus))");
             }
 
             if (!string.IsNullOrWhiteSpace(technology))
             {
-                filters.Add($"(({BuildUnicodeTextEquality(updatedTechnologyExpr, "@tech")}) OR ({BuildUnicodeTextEquality(originalTechnologyExpr, "@tech")}))");
+                filters.Add($"((CONVERT({updatedTechnologyExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @tech) OR (CONVERT({originalTechnologyExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @tech))");
             }
 
             if (band.HasValue)
@@ -5707,29 +5707,64 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             return filters.Count == 0 ? string.Empty : " AND " + string.Join(" AND ", filters);
         }
 
-        private static string BuildUnicodeTextEquality(string columnExpr, string parameterName)
-        {
-            static string Normalize(string expr) =>
-                $"CONVERT({expr} USING utf8mb4) COLLATE utf8mb4_unicode_ci";
-
-            return $"{Normalize(columnExpr)} = {Normalize(parameterName)}";
-        }
-
         private static void AddSitePredictionFilterParameters(
             DbCommand cmd,
             int? site,
-            int? cellId,
+            string? cellId,
             string? cluster,
             string? technology,
             int? band,
             int? pci)
         {
             if (site.HasValue) Add(cmd, "@site", site.Value);
-            if (cellId.HasValue) Add(cmd, "@cell", cellId.Value);
+            if (!string.IsNullOrWhiteSpace(cellId)) Add(cmd, "@cell", cellId.Trim());
             if (!string.IsNullOrWhiteSpace(cluster)) Add(cmd, "@clus", cluster.Trim());
             if (!string.IsNullOrWhiteSpace(technology)) Add(cmd, "@tech", technology.Trim());
             if (band.HasValue) Add(cmd, "@band", band.Value);
             if (pci.HasValue) Add(cmd, "@pci", pci.Value);
+        }
+
+        private async Task EnsureSitePredictionOptimizedTableAsync(DbConnection conn)
+        {
+            await using (var createCmd = conn.CreateCommand())
+            {
+                createCmd.CommandText = "CREATE TABLE IF NOT EXISTS site_prediction_optimized LIKE site_prediction;";
+                await createCmd.ExecuteNonQueryAsync();
+            }
+
+            var requiredColumns = new (string Name, string Definition)[]
+            {
+                ("site_prediction_id", "INT NULL"),
+                ("is_updated", "TINYINT(1) NOT NULL DEFAULT 1"),
+                ("version", "INT NOT NULL DEFAULT 1"),
+                ("status", "VARCHAR(20) NULL DEFAULT 'updated'"),
+                ("created_at", "DATETIME NULL"),
+                ("updated_at", "DATETIME NULL"),
+                ("updated_by", "VARCHAR(255) NULL")
+            };
+
+            foreach (var column in requiredColumns)
+            {
+                await using var existsCmd = conn.CreateCommand();
+                existsCmd.CommandText = @"
+                    SELECT COUNT(*)
+                    FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'site_prediction_optimized'
+                      AND COLUMN_NAME = @columnName;";
+                Add(existsCmd, "@columnName", column.Name);
+
+                var existsObj = await existsCmd.ExecuteScalarAsync();
+                var exists = existsObj != null && existsObj != DBNull.Value && Convert.ToInt32(existsObj) > 0;
+                if (exists)
+                {
+                    continue;
+                }
+
+                await using var alterCmd = conn.CreateCommand();
+                alterCmd.CommandText = $"ALTER TABLE site_prediction_optimized ADD COLUMN {column.Name} {column.Definition};";
+                await alterCmd.ExecuteNonQueryAsync();
+            }
         }
 
         private static async Task<HashSet<string>> GetTableColumnSetAsync(DbConnection conn, string tableName)
@@ -5792,7 +5827,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
         public Task<IActionResult> GetUpdatedSitePrediction(
             [FromQuery] long projectId,
             [FromQuery] int? site = null,
-            [FromQuery] int? cell_id = null,
+            [FromQuery] string? cell_id = null,
             [FromQuery] string? cluster = null,
             [FromQuery] string? technology = null,
             [FromQuery] int? band = null,
@@ -5807,12 +5842,12 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
         public async Task<IActionResult> GetSitePrediction(
             [FromQuery] long projectId,
             [FromQuery] int? site = null,
-            [FromQuery] int? cell_id = null,
+            [FromQuery] string? cell_id = null,
             [FromQuery] string? cluster = null,
             [FromQuery] string? technology = null,
             [FromQuery] int? band = null,
             [FromQuery] int? pci = null,
-            [FromQuery] int limit = 1000,
+            [FromQuery] int limit = 200,
             [FromQuery] int offset = 0,
             [FromQuery] string version = "combined")
         {
@@ -5833,6 +5868,11 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             var conn = db.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
                 await conn.OpenAsync();
+
+            if (requestedVersion == "combined")
+            {
+                await EnsureSitePredictionOptimizedTableAsync(conn);
+            }
 
             await using var cmd = conn.CreateCommand();
             var filterClause = requestedVersion == "combined"
@@ -5918,13 +5958,17 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                             OR (
                                 (o.site_prediction_id IS NULL OR o.site_prediction_id = 0 OR o.site_prediction_id = o.tbl_project_id)
                                 AND (
-                                    (o.cell_id IS NOT NULL AND sp.cell_id IS NOT NULL AND
-                                        CONVERT(o.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-                                        CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+                                    (
+                                        o.cell_id IS NOT NULL
+                                        AND sp.cell_id IS NOT NULL
+                                        AND CONVERT(o.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                            CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                                    )
                                     OR (
                                         o.site IS NOT NULL
                                         AND sp.site IS NOT NULL
-                                        AND o.site = sp.site
+                                        AND CONVERT(o.site USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                            CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci
                                         AND (
                                             o.sector IS NULL
                                             OR sp.sector IS NULL
@@ -6019,7 +6063,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
         public async Task<IActionResult> CompareSitePrediction(
             [FromQuery] long projectId,
             [FromQuery] int? site = null,
-            [FromQuery] int? cell_id = null,
+            [FromQuery] string? cell_id = null,
             [FromQuery] string? cluster = null,
             [FromQuery] string? technology = null,
             [FromQuery] int? band = null,
@@ -6034,6 +6078,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             if (conn.State != System.Data.ConnectionState.Open)
                 await conn.OpenAsync();
 
+            await EnsureSitePredictionOptimizedTableAsync(conn);
             var sourceColumns = await GetTableColumnSetAsync(conn, "site_prediction");
             var optimizedColumns = await GetTableColumnSetAsync(conn, "site_prediction_optimized");
             var optimizedOnlyColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -6103,13 +6148,17 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                             OR (
                                 (o.site_prediction_id IS NULL OR o.site_prediction_id = 0 OR o.site_prediction_id = o.tbl_project_id)
                                 AND (
-                                    (o.cell_id IS NOT NULL AND sp.cell_id IS NOT NULL AND
-                                        CONVERT(o.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-                                        CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+                                    (
+                                        o.cell_id IS NOT NULL
+                                        AND sp.cell_id IS NOT NULL
+                                        AND CONVERT(o.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                            CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                                    )
                                     OR (
                                         o.site IS NOT NULL
                                         AND sp.site IS NOT NULL
-                                        AND o.site = sp.site
+                                        AND CONVERT(o.site USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                            CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci
                                         AND (
                                             o.sector IS NULL
                                             OR sp.sector IS NULL
@@ -6221,6 +6270,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 if (conn.State != System.Data.ConnectionState.Open)
                     await conn.OpenAsync();
 
+                await EnsureSitePredictionOptimizedTableAsync(conn);
                 var sourceColumns = await GetTableColumnSetAsync(conn, "site_prediction");
                 var optimizedColumns = await GetTableColumnSetAsync(conn, "site_prediction_optimized");
                 var reservedOptimizedColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -6612,6 +6662,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 var conn = db.Database.GetDbConnection();
                 if (conn.State != ConnectionState.Open)
                     await conn.OpenAsync();
+
+                await EnsureSitePredictionOptimizedTableAsync(conn);
 
                 if (optimizedOnly)
                 {
@@ -8136,45 +8188,171 @@ public async Task<IActionResult> GetLtePredictionLocationStatsRefined(
 
 [HttpGet, Route("GetSitePredictionBase")]
 public async Task<IActionResult> GetSitePredictionBase(
-    [FromQuery(Name = "cell_id")] string? cellId = null)
+    [FromQuery(Name = "project_id")] int? projectId = null,
+    [FromQuery(Name = "node_b_id")] string? nodeBId = null,
+    [FromQuery(Name = "cell_id")] string? cellId = null,
+    [FromQuery(Name = "sector")] string? sector = null,
+    [FromQuery(Name = "sector_id")] string? sectorId = null)
 {
-    if (string.IsNullOrWhiteSpace(cellId))
-        return BadRequest(new { Status = 0, Message = "cell_id is required." });
+    var trimmedNodeBId = string.IsNullOrWhiteSpace(nodeBId) ? null : nodeBId.Trim();
+    var trimmedCellId = string.IsNullOrWhiteSpace(cellId) ? null : cellId.Trim();
+    var trimmedSector = string.IsNullOrWhiteSpace(sector) ? null : sector.Trim();
+    var trimmedSectorId = string.IsNullOrWhiteSpace(sectorId) ? null : sectorId.Trim();
+    var lookupSector = trimmedSectorId ?? trimmedSector;
+    var combinedNodeBCellId =
+        !string.IsNullOrWhiteSpace(trimmedNodeBId) && !string.IsNullOrWhiteSpace(trimmedCellId)
+            ? $"{trimmedNodeBId}_{trimmedCellId}"
+            : (string.IsNullOrWhiteSpace(trimmedNodeBId) &&
+               !string.IsNullOrWhiteSpace(trimmedCellId) &&
+               trimmedCellId.Contains("_", StringComparison.Ordinal)
+                ? trimmedCellId
+                : null);
+
+    if (string.IsNullOrWhiteSpace(trimmedNodeBId) &&
+        string.IsNullOrWhiteSpace(trimmedCellId) &&
+        string.IsNullOrWhiteSpace(lookupSector))
+    {
+        return BadRequest(new
+        {
+            Status = 0,
+            Message = "At least one lookup key is required (node_b_id, cell_id, sector, or sector_id)."
+        });
+    }
 
     try
     {
         const string tableName = "lte_prediction_baseline_results";
-        var trimmedCellId = cellId.Trim();
-        var query = db.site_prediction_base
-            .AsNoTracking()
-            .Where(x => x.cell_id == trimmedCellId)
-            .OrderByDescending(x => x.id);
+        var conn = db.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open)
+            await conn.OpenAsync();
 
-        var items = await query
-            .Select(x => new
+        var baselineColumns = await GetTableColumnSetAsync(conn, tableName);
+        string? baselineCombinedColumn = null;
+        foreach (var candidate in new[] { "node_b_cell_id", "nodeb_id_cell_id" })
+        {
+            if (baselineColumns.Contains(candidate))
             {
-                x.id,
-                x.project_id,
-                x.job_id,
-                x.site_id,
-                x.lat,
-                x.lon,
-                x.pred_rsrp,
-                x.pred_rsrq,
-                x.pred_sinr,
-                x.node_b_id,
-                x.cell_id,
-                operator_name = x.Operator,
-                x.created_at,
-                x.nodeb_id_cell_id
-            })
-            .ToListAsync();
+                baselineCombinedColumn = candidate;
+                break;
+            }
+        }
+        string? sectorColumn = null;
+        foreach (var candidate in new[] { "sector_id", "sector", "sec_id" })
+        {
+            if (baselineColumns.Contains(candidate))
+            {
+                sectorColumn = candidate;
+                break;
+            }
+        }
+
+        string Eq(string alias, string column, string paramName) =>
+            $"CONVERT(COALESCE({alias}.`{column}`, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(@{paramName} USING utf8mb4) COLLATE utf8mb4_unicode_ci";
+
+        var andClauses = new List<string>();
+        if (projectId.HasValue && baselineColumns.Contains("project_id"))
+            andClauses.Add("b.`project_id` = @project_id");
+
+        var lookupClauses = new List<string>();
+        var hasNodeLookup = !string.IsNullOrWhiteSpace(trimmedNodeBId);
+        var hasCellLookup = !string.IsNullOrWhiteSpace(trimmedCellId);
+
+        if (hasNodeLookup && hasCellLookup)
+        {
+            if (!string.IsNullOrWhiteSpace(baselineCombinedColumn) && !string.IsNullOrWhiteSpace(combinedNodeBCellId))
+                lookupClauses.Add(Eq("b", baselineCombinedColumn, "node_b_cell_id"));
+
+            if (baselineColumns.Contains("node_b_id") && baselineColumns.Contains("cell_id"))
+                lookupClauses.Add($"({Eq("b", "node_b_id", "node_b_id")} AND {Eq("b", "cell_id", "cell_id")})");
+            else if (baselineColumns.Contains("site_id") && baselineColumns.Contains("cell_id"))
+                lookupClauses.Add($"({Eq("b", "site_id", "node_b_id")} AND {Eq("b", "cell_id", "cell_id")})");
+        }
+        else
+        {
+            if (hasNodeLookup)
+            {
+                if (baselineColumns.Contains("node_b_id")) lookupClauses.Add(Eq("b", "node_b_id", "node_b_id"));
+                if (baselineColumns.Contains("site_id")) lookupClauses.Add(Eq("b", "site_id", "node_b_id"));
+                if (!string.IsNullOrWhiteSpace(baselineCombinedColumn)) lookupClauses.Add(Eq("b", baselineCombinedColumn, "node_b_id"));
+            }
+            if (hasCellLookup)
+            {
+                if (baselineColumns.Contains("cell_id")) lookupClauses.Add(Eq("b", "cell_id", "cell_id"));
+                if (!string.IsNullOrWhiteSpace(baselineCombinedColumn)) lookupClauses.Add(Eq("b", baselineCombinedColumn, "cell_id"));
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(lookupSector))
+        {
+            if (hasNodeLookup && !string.IsNullOrWhiteSpace(sectorColumn) && baselineColumns.Contains("node_b_id"))
+            {
+                lookupClauses.Add($"({Eq("b", "node_b_id", "node_b_id")} AND {Eq("b", sectorColumn, "sector_lookup")})");
+            }
+            else
+            {
+                if (!string.IsNullOrWhiteSpace(sectorColumn)) lookupClauses.Add(Eq("b", sectorColumn, "sector_lookup"));
+                if (baselineColumns.Contains("cell_id")) lookupClauses.Add(Eq("b", "cell_id", "sector_lookup"));
+            }
+        }
+
+        if (lookupClauses.Count == 0)
+            return Ok(new { Status = 1, Table = tableName, Count = 0, Data = Array.Empty<object>() });
+
+        var whereParts = new List<string>();
+        if (andClauses.Count > 0) whereParts.AddRange(andClauses);
+        whereParts.Add($"({string.Join(" OR ", lookupClauses)})");
+
+        var selectSector = !string.IsNullOrWhiteSpace(sectorColumn)
+            ? $"b.`{sectorColumn}` AS sector_lookup"
+            : "NULL AS sector_lookup";
+
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $@"
+SELECT
+    b.id,
+    b.project_id,
+    b.job_id,
+    b.site_id,
+    b.lat,
+    b.lon,
+    b.pred_rsrp,
+    b.pred_rsrq,
+    b.pred_sinr,
+    b.node_b_id,
+    b.cell_id,
+    b.operator AS operator_name,
+    b.created_at,
+    {(string.IsNullOrWhiteSpace(baselineCombinedColumn) ? "NULL" : $"b.`{baselineCombinedColumn}`")} AS node_b_cell_id,
+    {selectSector}
+FROM {tableName} b
+WHERE {string.Join(" AND ", whereParts)}
+ORDER BY b.id DESC;";
+
+        if (projectId.HasValue) Add(cmd, "@project_id", projectId.Value);
+        if (!string.IsNullOrWhiteSpace(trimmedNodeBId)) Add(cmd, "@node_b_id", trimmedNodeBId);
+        if (!string.IsNullOrWhiteSpace(trimmedCellId)) Add(cmd, "@cell_id", trimmedCellId);
+        if (!string.IsNullOrWhiteSpace(combinedNodeBCellId)) Add(cmd, "@node_b_cell_id", combinedNodeBCellId);
+        if (!string.IsNullOrWhiteSpace(lookupSector)) Add(cmd, "@sector_lookup", lookupSector);
+
+        var items = new List<Dictionary<string, object?>>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < reader.FieldCount; i++)
+                row[reader.GetName(i)] = await reader.IsDBNullAsync(i) ? null : reader.GetValue(i);
+            items.Add(row);
+        }
 
         return Ok(new
         {
             Status = 1,
             Table = tableName,
+            ProjectIdFiltered = projectId,
             CellIdFiltered = trimmedCellId,
+            NodeBIdFiltered = trimmedNodeBId,
+            NodeBCellIdFiltered = combinedNodeBCellId,
+            SectorFiltered = lookupSector,
             Total = items.Count,
             Count = items.Count,
             Data = items
@@ -8188,12 +8366,36 @@ public async Task<IActionResult> GetSitePredictionBase(
 
 [HttpGet, Route("GetSitePredictionOptimised")]
 public async Task<IActionResult> GetSitePredictionOptimised(
+    [FromQuery(Name = "project_id")] int? projectId = null,
     [FromQuery(Name = "node_b_id")] string? nodeBId = null,
-    [FromQuery(Name = "cell_id")] string? cellId = null)
+    [FromQuery(Name = "cell_id")] string? cellId = null,
+    [FromQuery(Name = "sector")] string? sector = null,
+    [FromQuery(Name = "sector_id")] string? sectorId = null)
 {
-    var nodeBIdFilter = (nodeBId ?? cellId)?.Trim();
-    if (string.IsNullOrWhiteSpace(nodeBIdFilter))
-        return BadRequest(new { Status = 0, Message = "node_b_id is required." });
+    var trimmedNodeBId = string.IsNullOrWhiteSpace(nodeBId) ? null : nodeBId.Trim();
+    var trimmedCellId = string.IsNullOrWhiteSpace(cellId) ? null : cellId.Trim();
+    var trimmedSector = string.IsNullOrWhiteSpace(sector) ? null : sector.Trim();
+    var trimmedSectorId = string.IsNullOrWhiteSpace(sectorId) ? null : sectorId.Trim();
+    var lookupSector = trimmedSectorId ?? trimmedSector;
+    var combinedNodeBCellId =
+        !string.IsNullOrWhiteSpace(trimmedNodeBId) && !string.IsNullOrWhiteSpace(trimmedCellId)
+            ? $"{trimmedNodeBId}_{trimmedCellId}"
+            : (string.IsNullOrWhiteSpace(trimmedNodeBId) &&
+               !string.IsNullOrWhiteSpace(trimmedCellId) &&
+               trimmedCellId.Contains("_", StringComparison.Ordinal)
+                ? trimmedCellId
+                : null);
+
+    if (string.IsNullOrWhiteSpace(trimmedNodeBId) &&
+        string.IsNullOrWhiteSpace(trimmedCellId) &&
+        string.IsNullOrWhiteSpace(lookupSector))
+    {
+        return BadRequest(new
+        {
+            Status = 0,
+            Message = "At least one lookup key is required (node_b_id, cell_id, sector, or sector_id)."
+        });
+    }
 
     try
     {
@@ -8201,61 +8403,168 @@ public async Task<IActionResult> GetSitePredictionOptimised(
         if (conn.State != System.Data.ConnectionState.Open)
             await conn.OpenAsync();
 
+        var optimizedColumns = await GetTableColumnSetAsync(conn, "lte_prediction_optimised_results");
+        var baselineColumns = await GetTableColumnSetAsync(conn, "lte_prediction_baseline_results");
+        string? optimizedCombinedColumn = null;
+        foreach (var candidate in new[] { "node_b_cell_id", "nodeb_id_cell_id" })
+        {
+            if (optimizedColumns.Contains(candidate))
+            {
+                optimizedCombinedColumn = candidate;
+                break;
+            }
+        }
+        string? baselineCombinedColumn = null;
+        foreach (var candidate in new[] { "node_b_cell_id", "nodeb_id_cell_id" })
+        {
+            if (baselineColumns.Contains(candidate))
+            {
+                baselineCombinedColumn = candidate;
+                break;
+            }
+        }
+
+        string? optimizedSectorColumn = null;
+        foreach (var candidate in new[] { "sector_id", "sector", "sec_id" })
+        {
+            if (optimizedColumns.Contains(candidate))
+            {
+                optimizedSectorColumn = candidate;
+                break;
+            }
+        }
+
+        string? baselineSectorColumn = null;
+        foreach (var candidate in new[] { "sector_id", "sector", "sec_id" })
+        {
+            if (baselineColumns.Contains(candidate))
+            {
+                baselineSectorColumn = candidate;
+                break;
+            }
+        }
+
+        string Eq(string alias, string column, string paramName) =>
+            $"CONVERT(COALESCE({alias}.`{column}`, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(@{paramName} USING utf8mb4) COLLATE utf8mb4_unicode_ci";
+
+        string BuildWhereClause(string alias, HashSet<string> columns, string? sectorColumn)
+        {
+            var andClauses = new List<string>();
+            if (projectId.HasValue && columns.Contains("project_id"))
+                andClauses.Add($"{alias}.`project_id` = @project_id");
+
+            var lookupClauses = new List<string>();
+            var hasNodeLookup = !string.IsNullOrWhiteSpace(trimmedNodeBId);
+            var hasCellLookup = !string.IsNullOrWhiteSpace(trimmedCellId);
+
+            if (hasNodeLookup && hasCellLookup)
+            {
+                if (!string.IsNullOrWhiteSpace(combinedNodeBCellId))
+                {
+                    if (columns.Contains("node_b_cell_id")) lookupClauses.Add(Eq(alias, "node_b_cell_id", "node_b_cell_id"));
+                    if (columns.Contains("nodeb_id_cell_id")) lookupClauses.Add(Eq(alias, "nodeb_id_cell_id", "node_b_cell_id"));
+                }
+
+                if (columns.Contains("node_b_id") && columns.Contains("cell_id"))
+                    lookupClauses.Add($"({Eq(alias, "node_b_id", "node_b_id")} AND {Eq(alias, "cell_id", "cell_id")})");
+                else if (columns.Contains("site_id") && columns.Contains("cell_id"))
+                    lookupClauses.Add($"({Eq(alias, "site_id", "node_b_id")} AND {Eq(alias, "cell_id", "cell_id")})");
+            }
+            else
+            {
+                if (hasNodeLookup)
+                {
+                    if (columns.Contains("node_b_id")) lookupClauses.Add(Eq(alias, "node_b_id", "node_b_id"));
+                    if (columns.Contains("site_id")) lookupClauses.Add(Eq(alias, "site_id", "node_b_id"));
+                    if (columns.Contains("node_b_cell_id")) lookupClauses.Add(Eq(alias, "node_b_cell_id", "node_b_id"));
+                    if (columns.Contains("nodeb_id_cell_id")) lookupClauses.Add(Eq(alias, "nodeb_id_cell_id", "node_b_id"));
+                }
+                if (hasCellLookup)
+                {
+                    if (columns.Contains("cell_id")) lookupClauses.Add(Eq(alias, "cell_id", "cell_id"));
+                    if (columns.Contains("node_b_cell_id")) lookupClauses.Add(Eq(alias, "node_b_cell_id", "cell_id"));
+                    if (columns.Contains("nodeb_id_cell_id")) lookupClauses.Add(Eq(alias, "nodeb_id_cell_id", "cell_id"));
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(lookupSector))
+            {
+                if (hasNodeLookup && !string.IsNullOrWhiteSpace(sectorColumn) && columns.Contains("node_b_id"))
+                {
+                    lookupClauses.Add($"({Eq(alias, "node_b_id", "node_b_id")} AND {Eq(alias, sectorColumn, "sector_lookup")})");
+                }
+                else
+                {
+                    if (!string.IsNullOrWhiteSpace(sectorColumn)) lookupClauses.Add(Eq(alias, sectorColumn, "sector_lookup"));
+                    if (columns.Contains("cell_id")) lookupClauses.Add(Eq(alias, "cell_id", "sector_lookup"));
+                }
+            }
+
+            if (lookupClauses.Count == 0)
+                return "1=0";
+
+            var whereParts = new List<string>();
+            if (andClauses.Count > 0) whereParts.AddRange(andClauses);
+            whereParts.Add($"({string.Join(" OR ", lookupClauses)})");
+            return string.Join(" AND ", whereParts);
+        }
+
+        var optimizedWhere = BuildWhereClause("o", optimizedColumns, optimizedSectorColumn);
+        var baselineWhere = BuildWhereClause("b", baselineColumns, baselineSectorColumn);
+
+        var optimizedSectorSelect = !string.IsNullOrWhiteSpace(optimizedSectorColumn)
+            ? $"o.`{optimizedSectorColumn}` AS sector_lookup"
+            : "NULL AS sector_lookup";
+        var baselineSectorSelect = !string.IsNullOrWhiteSpace(baselineSectorColumn)
+            ? $"b.`{baselineSectorColumn}` AS sector_lookup"
+            : "NULL AS sector_lookup";
+
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"
-SELECT 
-    id, project_id, job_id, lat, lon,
-    pred_rsrp, pred_rsrq, pred_sinr,
-    node_b_id, cell_id, operator, created_at,
-    NULL AS total_count
-FROM (
+        cmd.CommandText = $@"
+WITH optimized_rows AS (
     SELECT 
-        id, project_id, job_id, lat, lon,
-        pred_rsrp, pred_rsrq, pred_sinr,
-        node_b_id, cell_id, operator, created_at
-    FROM lte_prediction_optimised_results
-    WHERE node_b_id = @node_b_id
-
-    UNION ALL
-
+        o.id, o.project_id, o.job_id, o.lat, o.lon,
+        o.pred_rsrp, o.pred_rsrq, o.pred_sinr,
+        o.node_b_id, o.cell_id, o.operator, o.created_at, o.site_id,
+        {(string.IsNullOrWhiteSpace(optimizedCombinedColumn) ? "NULL" : $"o.`{optimizedCombinedColumn}`")} AS node_b_cell_id,
+        {optimizedSectorSelect}
+    FROM lte_prediction_optimised_results o
+    WHERE {optimizedWhere}
+),
+baseline_rows AS (
     SELECT 
         b.id, b.project_id, b.job_id, b.lat, b.lon,
         b.pred_rsrp, b.pred_rsrq, b.pred_sinr,
-        b.node_b_id, b.cell_id, b.operator, b.created_at
+        b.node_b_id, b.cell_id, b.operator, b.created_at, b.site_id,
+        {(string.IsNullOrWhiteSpace(baselineCombinedColumn) ? "NULL" : $"b.`{baselineCombinedColumn}`")} AS node_b_cell_id,
+        {baselineSectorSelect}
     FROM lte_prediction_baseline_results b
-    WHERE b.node_b_id = @node_b_id
-      AND NOT EXISTS (
-          SELECT 1
-          FROM lte_prediction_optimised_results o
-          WHERE o.node_b_id = @node_b_id
-      )
-) AS final_data
+    WHERE {baselineWhere}
+)
+SELECT 
+    o.id, o.project_id, o.job_id, o.lat, o.lon,
+    o.pred_rsrp, o.pred_rsrq, o.pred_sinr,
+    o.node_b_id, o.cell_id, o.operator, o.created_at,
+    o.site_id, o.node_b_cell_id, o.sector_lookup,
+    'lte_prediction_optimised_results' AS source_table
+FROM optimized_rows o
 
 UNION ALL
 
-SELECT 
-    NULL,NULL,NULL,NULL,NULL,
-    NULL,NULL,NULL,
-    NULL,NULL,NULL,NULL,
-    COUNT(*) AS total_count
-FROM (
-    SELECT id
-    FROM lte_prediction_optimised_results
-    WHERE node_b_id = @node_b_id
+SELECT
+    b.id, b.project_id, b.job_id, b.lat, b.lon,
+    b.pred_rsrp, b.pred_rsrq, b.pred_sinr,
+    b.node_b_id, b.cell_id, b.operator, b.created_at,
+    b.site_id, b.node_b_cell_id, b.sector_lookup,
+    'lte_prediction_baseline_results' AS source_table
+FROM baseline_rows b
+WHERE NOT EXISTS (SELECT 1 FROM optimized_rows);";
 
-    UNION ALL
-
-    SELECT b.id
-    FROM lte_prediction_baseline_results b
-    WHERE b.node_b_id = @node_b_id
-      AND NOT EXISTS (
-          SELECT 1
-          FROM lte_prediction_optimised_results o
-          WHERE o.node_b_id = @node_b_id
-      )
-) AS count_data;";
-
-        Add(cmd, "@node_b_id", nodeBIdFilter);
+        if (projectId.HasValue) Add(cmd, "@project_id", projectId.Value);
+        if (!string.IsNullOrWhiteSpace(trimmedNodeBId)) Add(cmd, "@node_b_id", trimmedNodeBId);
+        if (!string.IsNullOrWhiteSpace(trimmedCellId)) Add(cmd, "@cell_id", trimmedCellId);
+        if (!string.IsNullOrWhiteSpace(combinedNodeBCellId)) Add(cmd, "@node_b_cell_id", combinedNodeBCellId);
+        if (!string.IsNullOrWhiteSpace(lookupSector)) Add(cmd, "@sector_lookup", lookupSector);
 
         var rows = new List<Dictionary<string, object?>>();
         await using var reader = await cmd.ExecuteReaderAsync();
@@ -8271,7 +8580,11 @@ FROM (
         return Ok(new
         {
             Status = 1,
-            NodeBIdFiltered = nodeBIdFilter,
+            ProjectIdFiltered = projectId,
+            NodeBIdFiltered = trimmedNodeBId,
+            CellIdFiltered = trimmedCellId,
+            NodeBCellIdFiltered = combinedNodeBCellId,
+            SectorFiltered = lookupSector,
             Count = rows.Count,
             Data = rows
         });

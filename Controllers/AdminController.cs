@@ -418,7 +418,13 @@ private int GetTargetCompanyId(int? explicitCompanyId)
         #region
 
         [HttpGet("GetUsers")]
-        public async Task<JsonResult> GetUsers(int company_id = 0, string UserName = null, string Email = null, string Mobile = null)
+        public async Task<JsonResult> GetUsers(
+            int company_id = 0,
+            string UserName = null,
+            string Email = null,
+            string Mobile = null,
+            int? Status = null,
+            string CompanyName = null)
         {
             var message = new ReturnAPIResponse();
             try
@@ -439,21 +445,32 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                     return Json(message);
                 }
 
-                var query = db.tbl_user.AsNoTracking().AsQueryable();
+                var query = from u in db.tbl_user.AsNoTracking()
+                            join c in db.tbl_company.AsNoTracking() on u.company_id equals c.id into companyJoin
+                            from company in companyJoin.DefaultIfEmpty()
+                            select new
+                            {
+                                User = u,
+                                CompanyName = company != null ? company.company_name : null
+                            };
 
                 // Non-super admins are always locked to their own company.
                 // Super admins can optionally request a specific company via company_id.
                 if (targetCompanyId > 0)
                 {
-                    query = query.Where(u => u.company_id == targetCompanyId);
+                    query = query.Where(x => x.User.company_id == targetCompanyId);
                 }
 
                 if (!string.IsNullOrWhiteSpace(UserName))
-                    query = query.Where(a => EF.Functions.Like(a.name, $"%{UserName}%"));
+                    query = query.Where(x => EF.Functions.Like(x.User.name, $"%{UserName}%"));
                 if (!string.IsNullOrWhiteSpace(Email))
-                    query = query.Where(a => EF.Functions.Like(a.email, $"%{Email}%"));
+                    query = query.Where(x => EF.Functions.Like(x.User.email, $"%{Email}%"));
                 if (!string.IsNullOrWhiteSpace(Mobile))
-                    query = query.Where(a => EF.Functions.Like(a.mobile, $"%{Mobile}%"));
+                    query = query.Where(x => EF.Functions.Like(x.User.mobile, $"%{Mobile}%"));
+                if (Status.HasValue)
+                    query = query.Where(x => x.User.isactive == Status.Value);
+                if (!string.IsNullOrWhiteSpace(CompanyName))
+                    query = query.Where(x => x.CompanyName != null && EF.Functions.Like(x.CompanyName, $"%{CompanyName}%"));
 
                 // Latest license code per company from issued licenses
                 var latestLicenseCodes = db.tbl_company_user_license_issued
@@ -468,41 +485,42 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                     });
 
                 var result = await query
-                    .OrderBy(a => a.name)
-                    .Select(u => new
+                    .OrderBy(x => x.User.name)
+                    .Select(x => new
                     {
                         license_code = latestLicenseCodes
-                            .Where(l => l.CompanyId == u.company_id)
+                            .Where(l => l.CompanyId == x.User.company_id)
                             .Select(l => l.LicenseCode)
                             .FirstOrDefault(),
                         ob_user = new tbl_user
                         {
-                            id = u.id,
-                            uid = u.uid,
-                            name = u.name,
-                            password = !string.IsNullOrEmpty(u.password) ? "***************" : null,
-                            email = u.email,
-                            make = u.make,
-                            model = u.model,
-                            os = u.os,
-                            operator_name = u.operator_name,
-                            company_id = u.company_id,
-                            mobile = u.mobile,
-                            isactive = u.isactive,
-                            m_user_type_id = u.m_user_type_id,
-                            last_login = u.last_login,
-                            date_created = u.date_created,
-                            device_id = u.device_id,
-                            gcm_id = u.gcm_id
+                            id = x.User.id,
+                            uid = x.User.uid,
+                            name = x.User.name,
+                            password = !string.IsNullOrEmpty(x.User.password) ? "***************" : null,
+                            email = x.User.email,
+                            make = x.User.make,
+                            model = x.User.model,
+                            os = x.User.os,
+                            operator_name = x.User.operator_name,
+                            company_id = x.User.company_id,
+                            mobile = x.User.mobile,
+                            isactive = x.User.isactive,
+                            m_user_type_id = x.User.m_user_type_id,
+                            last_login = x.User.last_login,
+                            date_created = x.User.date_created,
+                            device_id = x.User.device_id,
+                            gcm_id = x.User.gcm_id
                         },
-                        user_id = u.id,
-                        user_name = u.name,
-                        user_email = u.email,
-                        user_mobile = u.mobile,
-                        user_isactive = u.isactive,
-                        m_user_type_id = u.m_user_type_id,
-                        company_id = u.company_id,
-                        created_on = u.date_created
+                        user_id = x.User.id,
+                        user_name = x.User.name,
+                        user_email = x.User.email,
+                        user_mobile = x.User.mobile,
+                        user_isactive = x.User.isactive,
+                        m_user_type_id = x.User.m_user_type_id,
+                        company_id = x.User.company_id,
+                        company_name = x.CompanyName,
+                        created_on = x.User.date_created
                     })
                     .ToListAsync();
 

@@ -22,6 +22,7 @@ namespace SignalTracker.Controllers
         private readonly ILogger<HomeController> _logger;
         private readonly IConfiguration _configuration;
         private readonly IMemoryCache _cache;
+        private readonly IHttpContextAccessor _httpContextAccessor;
 
         public HomeController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor, ILogger<HomeController> logger, IConfiguration configuration, IMemoryCache cache)
         {
@@ -30,6 +31,7 @@ namespace SignalTracker.Controllers
             _logger = logger;
             _configuration = configuration;
             _cache = cache;
+            _httpContextAccessor = httpContextAccessor;
         }
 
         [HttpGet("")]
@@ -262,7 +264,7 @@ namespace SignalTracker.Controllers
                 _db.Entry(trackedUser).State = EntityState.Modified;
                 _db.SaveChanges();
 
-                var mail = new SendMail(_db);
+                var mail = new SendMail(_db, _httpContextAccessor);
                 string[] send_to = new[] { user.email };
                 string[] bcc_to = Array.Empty<string>();
 

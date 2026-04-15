@@ -12,6 +12,7 @@ namespace SignalTracker.Models
        private readonly IDbConnectionProvider _connectionProvider;
         internal object tbl_lte_prediction_results;
 
+        [ActivatorUtilitiesConstructor]
         public ApplicationDbContext(IDbConnectionProvider connectionProvider)
         {
             _connectionProvider = connectionProvider;

@@ -217,9 +217,16 @@ namespace SignalTracker.Controllers
 
                     // ── 5. FETCH PREDICTION DATA (raw ADO.NET) ──
                     // Use optimized + baseline-only logic similar to GetSitePredictionOptimised.
-                    // Baseline rows are included only when there is no matching optimized row for the same node_b_id + cell_id.
-                    var baselinePts = await FetchPredictionData(conn, "lte_prediction_baseline_results", projectId, excludeIfOptimized: true);
-                    var optimizedPts = await FetchPredictionData(conn, "lte_prediction_optimised_results", projectId, excludeIfOptimized: false);
+                    // Baseline rows are included only when there is no matching optimized row
+                    // across stable identifiers (nodeb_id_cell_id, node_b_id+cell_id, site_id+cell_id)
+                    // with lat/lon + cell_id fallback matching.
+                    var baselinePts = await FetchPredictionData(conn, "lte_prediction_baseline_results", projectId);
+                    var optimizedRawPts = await FetchPredictionData(conn, "lte_prediction_optimised_results", projectId);
+                    var optimizedSelectionKeys = await FetchOptimizedSelectionKeys(conn, projectId);
+                    var optimizedPts = BuildStatusAwareOptimizedPoints(
+                        baselinePts,
+                        optimizedRawPts,
+                        optimizedSelectionKeys);
                     var allPredictionPts = baselinePts.Concat(optimizedPts).ToList();
                     if (allPredictionPts.Count == 0)
                     {
@@ -415,7 +422,7 @@ namespace SignalTracker.Controllers
                     var response = new GridAnalyticsResponse
                     {
                         Status = 1,
-                        Message = $"Grid analytics computed and stored. boundary={boundarySource}; baselinePts={baselinePts.Count}; optimizedPts={optimizedPts.Count}; baselineMapped={baselineMappedPoints}; optimizedMapped={optimizedMappedPoints}; totalGrids={gridCells.Count}; gridsWithData={resultsList.Count}.",
+                        Message = $"Grid analytics computed and stored. boundary={boundarySource}; baselinePts={baselinePts.Count}; optimizedPts={optimizedPts.Count}; optimizedRawPts={optimizedRawPts.Count}; optimizedKeySites={optimizedSelectionKeys.SiteIds.Count}; optimizedKeyCells={optimizedSelectionKeys.CellIds.Count}; baselineMapped={baselineMappedPoints}; optimizedMapped={optimizedMappedPoints}; totalGrids={gridCells.Count}; gridsWithData={resultsList.Count}.",
                         Data = new GridAnalyticsData
                         {
                             project_id = projectId, grid_size_meters = gridSizeMeters,
@@ -784,13 +791,17 @@ namespace SignalTracker.Controllers
                                     OR (
                                         (o.site_prediction_id IS NULL OR o.site_prediction_id = 0 OR o.site_prediction_id = o.tbl_project_id)
                                         AND (
-                                            (o.cell_id IS NOT NULL AND sp.cell_id IS NOT NULL AND
-                                                CONVERT(o.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-                                                CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+                                            (
+                                                o.cell_id IS NOT NULL
+                                                AND sp.cell_id IS NOT NULL
+                                                AND CONVERT(o.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                                    CONVERT(sp.cell_id USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                                            )
                                             OR (
                                                 o.site IS NOT NULL
                                                 AND sp.site IS NOT NULL
-                                                AND o.site = sp.site
+                                                AND CONVERT(o.site USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                                                    CONVERT(sp.site USING utf8mb4) COLLATE utf8mb4_unicode_ci
                                                 AND (
                                                     o.sector IS NULL
                                                     OR sp.sector IS NULL
@@ -1068,29 +1079,25 @@ namespace SignalTracker.Controllers
             return inside;
         }
 
-        private async Task<List<PredPoint>> FetchPredictionData(DbConnection conn, string table, int projectId, bool excludeIfOptimized)
+        private async Task<List<PredPoint>> FetchPredictionData(DbConnection conn, string table, int projectId)
         {
             var pts = new List<PredPoint>();
             await using var cmd = conn.CreateCommand();
-            if (excludeIfOptimized && string.Equals(table, "lte_prediction_baseline_results", StringComparison.OrdinalIgnoreCase))
-            {
-                cmd.CommandText = @"
-SELECT b.lat, b.lon, b.pred_rsrp, b.pred_rsrq, b.pred_sinr
-FROM lte_prediction_baseline_results b
-WHERE b.project_id = @pid
-  AND NOT EXISTS (
-      SELECT 1
-      FROM lte_prediction_optimised_results o
-      WHERE o.project_id = b.project_id
-        AND COALESCE(o.node_b_id, '') = COALESCE(b.node_b_id, '')
-        AND COALESCE(o.cell_id, '') = COALESCE(b.cell_id, '')
-  );";
-            }
-            else
-            {
-                cmd.CommandText = $"SELECT lat, lon, pred_rsrp, pred_rsrq, pred_sinr FROM `{table}` WHERE project_id = @pid";
-            }
+            cmd.CommandText = $@"
+SELECT
+    lat,
+    lon,
+    pred_rsrp,
+    pred_rsrq,
+    pred_sinr,
+    node_b_id,
+    cell_id,
+    site_id,
+    nodeb_id_cell_id
+FROM `{table}`
+WHERE project_id = @pid";
             AddParam(cmd, "@pid", projectId);
+
             await using var rdr = await cmd.ExecuteReaderAsync();
             while (await rdr.ReadAsync())
             {
@@ -1118,10 +1125,195 @@ WHERE b.project_id = @pid
                     Lon = lon,
                     Rsrp = rdr.IsDBNull(2) ? null : Convert.ToDouble(rdr.GetValue(2)),
                     Rsrq = rdr.IsDBNull(3) ? null : Convert.ToDouble(rdr.GetValue(3)),
-                    Sinr = rdr.IsDBNull(4) ? null : Convert.ToDouble(rdr.GetValue(4))
+                    Sinr = rdr.IsDBNull(4) ? null : Convert.ToDouble(rdr.GetValue(4)),
+                    NodeBId = rdr.IsDBNull(5) ? null : rdr.GetValue(5)?.ToString(),
+                    CellId = rdr.IsDBNull(6) ? null : rdr.GetValue(6)?.ToString(),
+                    SiteId = rdr.IsDBNull(7) ? null : rdr.GetValue(7)?.ToString(),
+                    NodebIdCellId = rdr.IsDBNull(8) ? null : rdr.GetValue(8)?.ToString(),
                 });
             }
+
             return pts;
+        }
+
+        private async Task<OptimizedSelectionKeys> FetchOptimizedSelectionKeys(
+            DbConnection conn,
+            int projectId)
+        {
+            var keys = new OptimizedSelectionKeys();
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+SELECT
+    COALESCE(
+        NULLIF(TRIM(CAST(spo.site AS CHAR)), ''),
+        NULLIF(TRIM(CAST(sp.site AS CHAR)), '')
+    ) AS selected_site,
+    COALESCE(
+        NULLIF(TRIM(spo.cell_id), ''),
+        NULLIF(TRIM(sp.cell_id), '')
+    ) AS selected_cell_id,
+    spo.status AS optimized_status
+FROM site_prediction_optimized spo
+LEFT JOIN site_prediction sp
+    ON sp.id = spo.site_prediction_id
+WHERE spo.tbl_project_id = @pid;";
+            AddParam(cmd, "@pid", projectId);
+
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                var statusRaw = reader.IsDBNull(2) ? null : reader.GetValue(2)?.ToString();
+                if (!IsOptimizedStatus(statusRaw))
+                    continue;
+
+                AddComparableKey(
+                    keys.SiteIds,
+                    reader.IsDBNull(0) ? null : reader.GetValue(0)?.ToString());
+                AddComparableKey(
+                    keys.CellIds,
+                    reader.IsDBNull(1) ? null : reader.GetValue(1)?.ToString());
+            }
+
+            return keys;
+        }
+
+        private static List<PredPoint> BuildStatusAwareOptimizedPoints(
+            List<PredPoint> baselineRows,
+            List<PredPoint> optimizedRows,
+            OptimizedSelectionKeys selectionKeys)
+        {
+            if (baselineRows.Count == 0 && optimizedRows.Count == 0)
+                return new List<PredPoint>();
+
+            // If no optimized badges/status rows are available, optimized should behave
+            // as baseline (no changed sectors to substitute).
+            if (!selectionKeys.HasAny)
+                return baselineRows.ToList();
+
+            var selectedOptimizedRows = optimizedRows
+                .Where(row => IsRowInOptimizedSelection(row, selectionKeys))
+                .ToList();
+
+            // Keep baseline when optimized table doesn't have corresponding prediction points.
+            if (selectedOptimizedRows.Count == 0)
+                return baselineRows.ToList();
+
+            var availableOptimizedKeys = BuildSelectionKeysFromPredictionPoints(selectedOptimizedRows);
+
+            var baselineRowsToKeep = baselineRows
+                .Where(row =>
+                    !IsRowCoveredByOptimizedPrediction(row, selectionKeys, availableOptimizedKeys))
+                .ToList();
+
+            var merged = new List<PredPoint>(baselineRowsToKeep.Count + selectedOptimizedRows.Count);
+            merged.AddRange(baselineRowsToKeep);
+            merged.AddRange(selectedOptimizedRows);
+            return merged;
+        }
+
+        private static bool IsRowCoveredByOptimizedPrediction(
+            PredPoint row,
+            OptimizedSelectionKeys selectionKeys,
+            OptimizedSelectionKeys availableOptimizedKeys)
+        {
+            if (!IsRowInOptimizedSelection(row, selectionKeys))
+                return false;
+
+            var cellId = NormalizeComparableKey(row.CellId);
+            if (cellId.Length > 0 && availableOptimizedKeys.CellIds.Contains(cellId))
+                return true;
+
+            var siteId = NormalizeComparableKey(row.SiteId);
+            if (siteId.Length > 0 && availableOptimizedKeys.SiteIds.Contains(siteId))
+                return true;
+
+            var nodeBId = NormalizeComparableKey(row.NodeBId);
+            if (nodeBId.Length > 0 && availableOptimizedKeys.SiteIds.Contains(nodeBId))
+                return true;
+
+            return false;
+        }
+
+        private static bool IsRowInOptimizedSelection(PredPoint row, OptimizedSelectionKeys selectionKeys)
+        {
+            var cellId = NormalizeComparableKey(row.CellId);
+            if (cellId.Length > 0 && selectionKeys.CellIds.Contains(cellId))
+                return true;
+
+            var siteId = NormalizeComparableKey(row.SiteId);
+            if (siteId.Length > 0 && selectionKeys.SiteIds.Contains(siteId))
+                return true;
+
+            var nodeBId = NormalizeComparableKey(row.NodeBId);
+            if (nodeBId.Length > 0 && selectionKeys.SiteIds.Contains(nodeBId))
+                return true;
+
+            return false;
+        }
+
+        private static OptimizedSelectionKeys BuildSelectionKeysFromPredictionPoints(
+            IEnumerable<PredPoint> rows)
+        {
+            var keys = new OptimizedSelectionKeys();
+
+            foreach (var row in rows)
+            {
+                AddComparableKey(keys.CellIds, row.CellId);
+                AddComparableKey(keys.SiteIds, row.SiteId);
+                AddComparableKey(keys.SiteIds, row.NodeBId);
+            }
+
+            return keys;
+        }
+
+        private static bool IsOptimizedStatus(string? statusRaw)
+        {
+            var status = string.IsNullOrWhiteSpace(statusRaw)
+                ? string.Empty
+                : statusRaw.Trim().ToLowerInvariant();
+
+            if (status.Length == 0)
+                return true;
+
+            if (status.Contains("baseline"))
+                return false;
+            if (status.Contains("original"))
+                return false;
+            if (status.Contains("revert"))
+                return false;
+            if (status.Contains("delete"))
+                return false;
+
+            return true;
+        }
+
+        private static void AddComparableKey(HashSet<string> target, string? value)
+        {
+            var normalized = NormalizeComparableKey(value);
+            if (normalized.Length > 0)
+                target.Add(normalized);
+        }
+
+        private static string NormalizeComparableKey(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+
+            var trimmed = value.Trim();
+
+            if (long.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var asLong))
+                return asLong.ToString(CultureInfo.InvariantCulture);
+
+            if (double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out var asDouble))
+            {
+                if (Math.Abs(asDouble - Math.Round(asDouble)) < 0.0000001)
+                    return Math.Round(asDouble).ToString(CultureInfo.InvariantCulture);
+
+                return asDouble.ToString("0.########", CultureInfo.InvariantCulture);
+            }
+
+            return trimmed.ToLowerInvariant();
         }
 
         private static List<(double Lat, double Lon)> BuildBoundingPolygonFromPoints(List<PredPoint> points)
@@ -1338,6 +1530,13 @@ WHERE b.project_id = @pid
         // =====================================================================
         // DTOs
         // =====================================================================
+        private sealed class OptimizedSelectionKeys
+        {
+            public HashSet<string> SiteIds { get; } = new(StringComparer.OrdinalIgnoreCase);
+            public HashSet<string> CellIds { get; } = new(StringComparer.OrdinalIgnoreCase);
+            public bool HasAny => SiteIds.Count > 0 || CellIds.Count > 0;
+        }
+
         private class PredPoint
         {
             public double Lat { get; set; }
@@ -1345,6 +1544,10 @@ WHERE b.project_id = @pid
             public double? Rsrp { get; set; }
             public double? Rsrq { get; set; }
             public double? Sinr { get; set; }
+            public string? NodeBId { get; set; }
+            public string? CellId { get; set; }
+            public string? SiteId { get; set; }
+            public string? NodebIdCellId { get; set; }
         }
 
         private class GridCell

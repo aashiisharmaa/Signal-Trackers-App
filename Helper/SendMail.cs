@@ -4,7 +4,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Mail;
 using System.Net.Mime;
-using System.Web;
+using Microsoft.AspNetCore.Http;
 using System.IO;
 using SignalTracker.Helper;
 using SignalTracker.Models; 
@@ -15,14 +15,16 @@ namespace SignalTracker
     
     public class SendMail
     {        
-        ApplicationDbContext db = null;
+        private readonly ApplicationDbContext db;
         //CommonFunction cf = null;
-        public SendMail(ApplicationDbContext context)
+        public SendMail(ApplicationDbContext context, IHttpContextAccessor? httpContextAccessor = null)
         {
             db = context;
+            // The accessor is kept for backward compatibility with existing call sites,
+            // but recipient resolution now uses only the explicit list or configured defaults.
             //cf = new CommonFunction(context, httpContextAccessor);
         }        
-        public bool send_mail(string message, string[] to, string[] bcc, string subject, byte[] bt_attachment, string attachment_name)
+        public bool send_mail(string message, string[]? to, string[]? bcc, string subject, byte[]? bt_attachment, string attachment_name)
         {
 
             bool isSend = false;
@@ -34,6 +36,11 @@ namespace SignalTracker
                 var Set_email = db.m_email_setting.Where(a => a.m_Status_ID == 1).FirstOrDefault();
                 if (Set_email != null)
                 {
+                    var recipients = ResolveRecipients(to, Set_email);
+                    if (recipients.Length == 0)
+                        return false;
+
+                    // Sender stays fixed and always comes from the configured SMTP account.
                     string from = Set_email.UserName;
                     string from_password = Set_email.Password;
                     string str_body = "<html><meta name='viewport' content='width=device-width, initial-scale=1'>" +
@@ -51,17 +58,15 @@ namespace SignalTracker
                     //set the FROM address
                     mail.From = new MailAddress(from, "MouleForecast");
                     //set the RECIPIENTS
-                    for (int i = 0; i < to.Length; i++)
+                    for (int i = 0; i < recipients.Length; i++)
                     {
-                        if (to[i] == "")
+                        if (recipients[i] == "")
                             continue;
-                        else if (to[i] == null)
+                        else if (recipients[i] == null)
                             continue;
 
-                        mail.To.Add(to[i]);
+                        mail.To.Add(recipients[i]);
                     }
-                    if (to.Length == 0)
-                        mail.To.Add(Set_email.received_email_on);
                     if (bcc != null)
                     {
                         for (int i = 0; i < bcc.Length; i++)
@@ -97,6 +102,60 @@ namespace SignalTracker
                 writelog.write_exception_log(0, "SendMail", "send_mail", DateTime.Now, ex);
             }
             return isSend;
+        }
+
+        [Obsolete("Use send_mail_to_configured_recipients instead. This helper no longer resolves the current logged-in user.")]
+        public bool send_mail_to_current_user(string message, string subject, string[]? bcc = null, byte[]? bt_attachment = null, string attachment_name = "")
+        {
+            return send_mail_to_configured_recipients(message, subject, bcc, bt_attachment, attachment_name);
+        }
+
+        public bool send_mail_to_configured_recipients(string message, string subject, string[]? bcc = null, byte[]? bt_attachment = null, string attachment_name = "")
+        {
+            return send_mail(message, null, bcc, subject, bt_attachment, attachment_name);
+        }
+
+        private string[] ResolveRecipients(string[]? to, m_email_setting setEmail)
+        {
+            var recipients = new List<string>();
+
+            AddRecipientValues(recipients, to);
+
+            if (recipients.Count > 0)
+                return recipients.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
+            AddRecipientValues(recipients, new[] { setEmail.received_email_on });
+
+            return recipients.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+
+        private static void AddRecipientValues(List<string> recipients, IEnumerable<string>? values)
+        {
+            if (values == null)
+                return;
+
+            foreach (var value in values)
+            {
+                foreach (var email in SplitEmailList(value))
+                {
+                    if (!string.IsNullOrWhiteSpace(email))
+                        recipients.Add(email.Trim());
+                }
+            }
+        }
+
+        private static IEnumerable<string> SplitEmailList(string? values)
+        {
+            if (string.IsNullOrWhiteSpace(values))
+                yield break;
+
+            var parts = values.Split(new[] { ',', ';', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var part in parts)
+            {
+                var trimmed = part.Trim();
+                if (!string.IsNullOrWhiteSpace(trimmed))
+                    yield return trimmed;
+            }
         }
     }
 }
