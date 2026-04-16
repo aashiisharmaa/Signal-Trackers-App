@@ -12,6 +12,7 @@ namespace SignalTracker.Services
         public const string FeatureBenchmarkTab = "benchmark_tab";
         public const string FeatureRunPrediction = "run_prediction";
         public const string FeatureGridFetch = "grid_fetch";
+        private const string SuperAdminCountryCode = "TW";
 
         private static readonly string[] DefaultFeatures =
         {
@@ -177,8 +178,27 @@ WHERE license_id IN ({string.Join(", ", placeholders)});";
 
         public async Task<List<string>> GetEnabledFeaturesForUserAsync(int userId, CancellationToken ct = default)
         {
+            var snapshot = await GetFeatureAccessSnapshotAsync(userId, ct);
+            return snapshot.EnabledFeatures;
+        }
+
+        public async Task<bool> HasFeatureAccessAsync(int userId, string feature, bool defaultAllow = false, CancellationToken ct = default)
+        {
+            var snapshot = await GetFeatureAccessSnapshotAsync(userId, ct);
+            if (snapshot.IsSuperAdmin)
+                return true;
+
+            if (snapshot.EnabledFeatures.Count == 0)
+                return defaultAllow;
+
+            var normalizedFeature = Canonicalize(feature);
+            return snapshot.EnabledFeatures.Any(x => string.Equals(x, normalizedFeature, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private async Task<FeatureAccessSnapshot> GetFeatureAccessSnapshotAsync(int userId, CancellationToken ct = default)
+        {
             if (userId <= 0)
-                return new List<string>();
+                return new FeatureAccessSnapshot(false, new List<string>());
 
             var conn = _db.Database.GetDbConnection();
             var shouldClose = false;
@@ -194,26 +214,32 @@ WHERE license_id IN ({string.Join(", ", placeholders)});";
 
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = @"
-SELECT lfa.license_id, lfa.feature_codes
-FROM tbl_company_user_license_issued lic
+SELECT u.m_user_type_id, u.country_code, lfa.license_id, lfa.feature_codes
+FROM tbl_user u
+LEFT JOIN tbl_company_user_license_issued lic ON lic.tbl_user_id = u.id
+    AND lic.status = 1
+    AND DATE(lic.valid_till) >= UTC_DATE()
 LEFT JOIN license_feature_access lfa ON lfa.license_id = lic.id
-WHERE lic.tbl_user_id = @uid
-  AND lic.status = 1
-  AND DATE(lic.valid_till) >= UTC_DATE()
+WHERE u.id = @uid
 ORDER BY lic.valid_till DESC, lic.created_on DESC, lic.id DESC
 LIMIT 1;";
                 AddParam(cmd, "@uid", DbType.Int32, userId);
 
                 await using var reader = await cmd.ExecuteReaderAsync(ct);
                 if (!await reader.ReadAsync(ct))
-                    return new List<string>();
+                    return new FeatureAccessSnapshot(false, new List<string>());
 
-                var hasFeatureConfig = !reader.IsDBNull(0);
+                var userTypeId = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
+                var countryCode = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+                if (IsSuperAdminUser(userTypeId, countryCode))
+                    return new FeatureAccessSnapshot(true, DefaultFeatures.ToList());
+
+                var hasFeatureConfig = !reader.IsDBNull(2);
                 if (!hasFeatureConfig)
-                    return new List<string>();
+                    return new FeatureAccessSnapshot(false, new List<string>());
 
-                var raw = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
-                return NormalizeFeatures(new[] { raw }).ToList();
+                var raw = reader.IsDBNull(3) ? string.Empty : reader.GetString(3);
+                return new FeatureAccessSnapshot(false, NormalizeFeatures(new[] { raw }).ToList());
             }
             finally
             {
@@ -222,14 +248,10 @@ LIMIT 1;";
             }
         }
 
-        public async Task<bool> HasFeatureAccessAsync(int userId, string feature, bool defaultAllow = false, CancellationToken ct = default)
+        private static bool IsSuperAdminUser(int userTypeId, string? countryCode)
         {
-            var enabled = await GetEnabledFeaturesForUserAsync(userId, ct);
-            if (enabled.Count == 0)
-                return defaultAllow;
-
-            var normalizedFeature = Canonicalize(feature);
-            return enabled.Any(x => string.Equals(x, normalizedFeature, StringComparison.OrdinalIgnoreCase));
+            return userTypeId == UserScopeService.ROLE_SUPER_ADMIN
+                || string.Equals(countryCode, SuperAdminCountryCode, StringComparison.OrdinalIgnoreCase);
         }
 
         private static IEnumerable<string> SplitRaw(string? raw)
@@ -298,6 +320,18 @@ CREATE TABLE IF NOT EXISTS license_feature_access (
     INDEX idx_license_feature_access_license (license_id)
 );";
             await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        private sealed class FeatureAccessSnapshot
+        {
+            public FeatureAccessSnapshot(bool isSuperAdmin, List<string> enabledFeatures)
+            {
+                IsSuperAdmin = isSuperAdmin;
+                EnabledFeatures = enabledFeatures;
+            }
+
+            public bool IsSuperAdmin { get; }
+            public List<string> EnabledFeatures { get; }
         }
     }
 }
