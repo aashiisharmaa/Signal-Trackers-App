@@ -85,17 +85,21 @@ namespace SignalTracker.Models
 
             try
             {
-                var endpoints = _multiplexer.GetEndPoints();
-                if (endpoints.Length == 0)
-                    return keys;
+                var seen = new HashSet<string>(StringComparer.Ordinal);
 
-                var server = _multiplexer.GetServer(endpoints.First());
-
-                await foreach (var key in server.KeysAsync(pattern: pattern))
+                foreach (var endpoint in _multiplexer.GetEndPoints())
                 {
-                    keys.Add(key.ToString());
-                    if (keys.Count >= maxCount)
-                        break;
+                    var server = _multiplexer.GetServer(endpoint);
+
+                    await foreach (var key in server.KeysAsync(pattern: pattern))
+                    {
+                        if (!seen.Add(key.ToString()))
+                            continue;
+
+                        keys.Add(key.ToString());
+                        if (keys.Count >= maxCount)
+                            return keys;
+                    }
                 }
             }
             catch (Exception ex)
@@ -138,7 +142,40 @@ namespace SignalTracker.Models
 
         internal async Task<long> DeleteByPatternAsync(string v)
         {
-            throw new NotImplementedException();
+            if (_multiplexer == null)
+                return 0;
+
+            try
+            {
+                var keys = new HashSet<RedisKey>();
+
+                foreach (var endpoint in _multiplexer.GetEndPoints())
+                {
+                    var server = _multiplexer.GetServer(endpoint);
+
+                    await foreach (var key in server.KeysAsync(pattern: v))
+                    {
+                        keys.Add(key);
+                    }
+                }
+
+                if (keys.Count == 0)
+                    return 0;
+
+                long deleted = 0;
+                foreach (var key in keys)
+                {
+                    if (_db != null && await _db.KeyDeleteAsync(key))
+                        deleted++;
+                }
+
+                return deleted;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Redis DeleteByPatternAsync error: {ex.Message}");
+                return 0;
+            }
         }
 
         internal async Task<IEnumerable<object>> GetKeysAsync(object pattern, object limit)
@@ -148,7 +185,10 @@ namespace SignalTracker.Models
 
         internal async Task DeleteKeyAsync(string redisKey)
         {
-            throw new NotImplementedException();
+            if (_db == null)
+                return;
+
+            await _db.KeyDeleteAsync(redisKey);
         }
 
         internal async Task<bool> SetObjectAsync(object cacheKey, MapViewController.NetworkLogFullResponse cacheModel, int ttlSeconds)

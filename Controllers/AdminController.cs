@@ -315,6 +315,167 @@ private int GetTargetCompanyId(int? explicitCompanyId)
             cmd.Parameters.Add(p);
         }
 
+        private bool IsRedisReady => _redis != null && _redis.IsConnected;
+
+        private static string NormalizeCacheSegment(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "all";
+
+            return value.Trim()
+                .ToLowerInvariant()
+                .Replace(":", "_")
+                .Replace(" ", "_");
+        }
+
+        private async Task<T?> TryGetCachedObjectAsync<T>(string cacheKey) where T : class
+        {
+            if (!IsRedisReady)
+                return null;
+
+            try
+            {
+                return await _redis.GetObjectAsync<T>(cacheKey);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($" Redis read error [{cacheKey}]: {ex.Message}");
+                return null;
+            }
+        }
+
+        private async Task CacheObjectAsync<T>(string cacheKey, T value, int ttlSeconds) where T : class
+        {
+            if (!IsRedisReady || value == null)
+                return;
+
+            try
+            {
+                await _redis.SetObjectAsync(cacheKey, value, ttlSeconds);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($" Redis write error [{cacheKey}]: {ex.Message}");
+            }
+        }
+
+        private async Task<string?> TryGetCachedStringAsync(string cacheKey)
+        {
+            if (!IsRedisReady)
+                return null;
+
+            try
+            {
+                return await _redis.GetStringAsync(cacheKey);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($" Redis read error [{cacheKey}]: {ex.Message}");
+                return null;
+            }
+        }
+
+        private async Task CacheStringAsync(string cacheKey, string value, int ttlSeconds)
+        {
+            if (!IsRedisReady)
+                return;
+
+            try
+            {
+                await _redis.SetStringAsync(cacheKey, value, ttlSeconds);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($" Redis write error [{cacheKey}]: {ex.Message}");
+            }
+        }
+
+        private async Task<long?> TryGetCachedLongAsync(string cacheKey)
+        {
+            var cached = await TryGetCachedStringAsync(cacheKey);
+            if (string.IsNullOrWhiteSpace(cached))
+                return null;
+
+            return long.TryParse(cached, NumberStyles.Any, CultureInfo.InvariantCulture, out var value)
+                ? value
+                : null;
+        }
+
+        private Task CacheLongAsync(string cacheKey, long value, int ttlSeconds)
+        {
+            return CacheStringAsync(cacheKey, value.ToString(CultureInfo.InvariantCulture), ttlSeconds);
+        }
+
+        private async Task InvalidateCalculatedCachesAsync()
+        {
+            if (!IsRedisReady)
+                return;
+
+            var patterns = new[]
+            {
+                "alllogs:*",
+                "opcoverage:*",
+                "opquality:*",
+                "polygonpoints:*",
+                "polygongoodbad:*",
+                "DashboardTotalsV2:*",
+                "NetDur:*",
+                "MonthlySamples:*",
+                "SessionsDateRange:*",
+                "sessions:list:*",
+                "sesstechmin:*",
+                "indoorcount:*",
+                "outdoorcount:*",
+                "indoorkpis:*",
+                "outdoorkpis:*",
+                "indoorbadcount:*",
+                "indoorgoodcount:*",
+                "outdoorbadcount:*",
+                "outdoorgoodcount:*",
+                "indoorbadlogs:*",
+                "indoorgoodlogs:*",
+                "outdoorbadlogs:*",
+                "outdoorgoodlogs:*",
+                "indoorallsessionlogs:*",
+                "indoorallsessionlogspaged:*",
+                "OpSamples:*",
+                "OpAvgTpt10:*",
+                "netdist:*",
+                "AvgRsrp:*",
+                "AvgRsrq:*",
+                "AvgSinr:*",
+                "AvgMos:*",
+                "AvgJitter:*",
+                "AvgLatency:*",
+                "AvgPacketLoss:*",
+                "AvgDlTpt:*",
+                "AvgUlTpt:*",
+                "BandDist:*",
+                "HandsetDist:MakeOnly:*",
+                "op-indoor-outdoor-avg:*",
+                "boxplot:v7:*",
+                "AppKPIs:*",
+                "OperatorsList:*",
+                "NetworksList:*",
+                "users:list:*",
+                "users:by-id:*",
+                "coverageholes:*",
+                "netdur:*"
+            };
+
+            foreach (var pattern in patterns)
+            {
+                try
+                {
+                    await _redis.DeleteByPatternAsync(pattern);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($" Redis invalidation error [{pattern}]: {ex.Message}");
+                }
+            }
+        }
+
 
         /// <summary>
         /// Execute a LINQ query with an increased command timeout, then restore the old timeout.
@@ -331,75 +492,6 @@ private int GetTargetCompanyId(int? explicitCompanyId)
             finally
             {
                 db.Database.SetCommandTimeout(previousTimeout);
-            }
-        }
-
-        // ========================= ORIGINAL COMBINED DASHBOARD (operator KPIs by networkType) =========================
-        private async Task<List<dynamic>> GetOperatorKpisSqlAsync(string networkType)
-        {
-            var conn = db.Database.GetDbConnection();
-            var shouldClose = false;
-            try
-            {
-                if (conn.State != ConnectionState.Open) { await conn.OpenAsync(); shouldClose = true; }
-
-                var nt = NormalizeNetworkType(networkType);
-                var filter = (string.IsNullOrEmpty(nt) || nt.Equals("All", StringComparison.OrdinalIgnoreCase))
-                    ? ""
-                    : " AND n.network = @net "; // Changed LIKE to = for better index usage if network is normalized
-
-                var sql = @$"
-                    SELECT
-                      n.m_alpha_long                                 AS operator_name,
-                      COUNT(*)                                       AS samples,
-                      AVG(CASE WHEN n.rsrp IS NOT NULL THEN n.rsrp END)  AS avg_rsrp,
-                      AVG(CASE WHEN n.rsrq IS NOT NULL THEN n.rsrq END)  AS avg_rsrq,
-                      AVG(CASE WHEN n.sinr IS NOT NULL THEN n.sinr END)  AS avg_sinr,
-                      AVG(CASE WHEN n.mos  IS NOT NULL THEN n.mos  END)  AS avg_mos,
-                      AVG(CASE WHEN n.jitter IS NOT NULL THEN n.jitter END)  AS avg_jitter,
-                      AVG(CASE WHEN n.latency IS NOT NULL THEN n.latency END) AS avg_latency,
-                      AVG(CASE WHEN n.packet_loss IS NOT NULL THEN n.packet_loss END) AS avg_packet_loss,
-                      AVG(NULLIF(CAST(n.dl_tpt AS DECIMAL(18,4)),0))      AS avg_dl_tpt,
-                      AVG(NULLIF(CAST(n.ul_tpt AS DECIMAL(18,4)),0))      AS avg_ul_tpt
-                    FROM tbl_network_log n
-                    WHERE n.m_alpha_long IS NOT NULL AND n.m_alpha_long <> '' {filter}
-                    GROUP BY n.m_alpha_long
-                    ORDER BY samples DESC;";
-
-                await using var cmd = conn.CreateCommand();
-                cmd.CommandText = sql;
-                cmd.CommandTimeout = 240; // Increased timeout for heavy query
-
-                if (!string.IsNullOrEmpty(filter))
-                {
-                    Add(cmd, "@net", nt);
-                }
-
-                var list = new List<dynamic>();
-                await using var rd = await cmd.ExecuteReaderAsync();
-                while (await rd.ReadAsync())
-                {
-                    list.Add(new
-                    {
-                        name = rd.GetString(0),
-                        samples = rd.IsDBNull(1) ? 0 : Convert.ToInt32(rd.GetValue(1)),
-                        avg_rsrp = Math.Round(rd.IsDBNull(2) ? 0d : Convert.ToDouble(rd.GetValue(2)), 2),
-                        avg_rsrq = Math.Round(rd.IsDBNull(3) ? 0d : Convert.ToDouble(rd.GetValue(3)), 2),
-                        avg_sinr = Math.Round(rd.IsDBNull(4) ? 0d : Convert.ToDouble(rd.GetValue(4)), 2),
-                        avg_mos = Math.Round(rd.IsDBNull(5) ? 0d : Convert.ToDouble(rd.GetValue(5)), 2),
-                        avg_jitter = Math.Round(rd.IsDBNull(6) ? 0d : Convert.ToDouble(rd.GetValue(6)), 2),
-                        avg_latency = Math.Round(rd.IsDBNull(7) ? 0d : Convert.ToDouble(rd.GetValue(7)), 2),
-                        avg_packet_loss = Math.Round(rd.IsDBNull(8) ? 0d : Convert.ToDouble(rd.GetValue(8)), 2),
-                        avg_dl_tpt = Math.Round(rd.IsDBNull(9) ? 0d : Convert.ToDouble(rd.GetValue(9)), 2),
-                        avg_ul_tpt = Math.Round(rd.IsDBNull(10) ? 0d : Convert.ToDouble(rd.GetValue(10)), 2)
-                    });
-                }
-                return list;
-            }
-            finally
-            {
-                if (shouldClose && conn.State == ConnectionState.Open)
-                    await conn.CloseAsync();
             }
         }
 
@@ -444,6 +536,11 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                     message.Message = "Unauthorized. Unable to resolve Company Context.";
                     return Json(message);
                 }
+
+                var cacheKey = $"users:list:{targetCompanyId}:{NormalizeCacheSegment(UserName)}:{NormalizeCacheSegment(Email)}:{NormalizeCacheSegment(Mobile)}:{(Status.HasValue ? Status.Value.ToString(CultureInfo.InvariantCulture) : "all")}:{NormalizeCacheSegment(CompanyName)}";
+                var cached = await TryGetCachedObjectAsync<ReturnAPIResponse>(cacheKey);
+                if (cached != null)
+                    return Json(cached);
 
                 var query = from u in db.tbl_user.AsNoTracking()
                             join c in db.tbl_company.AsNoTracking() on u.company_id equals c.id into companyJoin
@@ -527,6 +624,7 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                 message.Data = result;
                 message.Status = 1;
                 message.Message = "Success";
+                await CacheObjectAsync(cacheKey, message, 300);
             }
             catch (Exception ex)
             {
@@ -549,6 +647,11 @@ private int GetTargetCompanyId(int? explicitCompanyId)
             {
                 cf.SessionCheck();
                 message.Status = 1; // cf.MatchToken(token);
+                var cacheKey = $"users:by-id:{UserID}";
+                var cached = await TryGetCachedObjectAsync<ReturnAPIResponse>(cacheKey);
+                if (cached != null)
+                    return Json(cached);
+
                 if (message.Status == 1)
                 {
                     var user = await db.tbl_user.AsNoTracking()
@@ -577,6 +680,7 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                         .FirstOrDefaultAsync();
 
                     message.Data = user;
+                    await CacheObjectAsync(cacheKey, message, 300);
                 }
             }
             catch (Exception ex)
@@ -637,6 +741,7 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                             message.Status = 1;
                             // Assuming DisplayMessage.UserDetailsSaved is a constant
                             message.Message = "User Details Saved";
+                            await InvalidateCalculatedCachesAsync();
                         }
                         else
                         {
@@ -658,6 +763,7 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                             message.Status = 2;
                             // Assuming DisplayMessage.UserDetailsUpdated is a constant
                             message.Message = "User Details Updated";
+                            await InvalidateCalculatedCachesAsync();
                         }
                     }
                     message.token = ""; // cf.CreateToken(ip);
@@ -756,6 +862,7 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                     message.Status = 1;
                     message.Message = "User deleted successfully";
                     message.token = cf.CreateToken(request.Ip);
+                    await InvalidateCalculatedCachesAsync();
                 }
                 else
                 {
@@ -808,6 +915,7 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                     message.Status = 1;
                     message.Message = "User activated successfully";
                     message.token = cf.CreateToken(request.Ip);
+                    await InvalidateCalculatedCachesAsync();
                 }
                 else
                 {
@@ -860,6 +968,7 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                     message.Status = 1;
                     message.Message = "User inactivated successfully";
                     message.token = cf.CreateToken(request.Ip);
+                    await InvalidateCalculatedCachesAsync();
                 }
                 else
                 {
@@ -911,6 +1020,7 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                     message.Status = 1;
                     message.Message = "User permanently deleted";
                     message.token = cf.CreateToken(request.Ip);
+                    await InvalidateCalculatedCachesAsync();
                 }
                 else
                 {
@@ -948,6 +1058,7 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                     await db.SaveChangesAsync();
                     ret.Status = 1;
                     ret.Message = "Password has been reset successfully.";
+                    await InvalidateCalculatedCachesAsync();
                 }
                 else
                 {
@@ -981,6 +1092,7 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                         db.Entry(getUser).State = EntityState.Modified;
                         await db.SaveChangesAsync();
                         ret.Status = 1;
+                        await InvalidateCalculatedCachesAsync();
                     }
                     else
                     {
@@ -1021,6 +1133,30 @@ private int GetTargetCompanyId(int? explicitCompanyId)
             public double? sinr { get; set; }
             public string network { get; set; }
             public DateTime? timestamp { get; set; }
+        }
+
+        public class PagedNetworkLogItem
+        {
+            public long id { get; set; }
+            public long session_id { get; set; }
+            public double? lat { get; set; }
+            public double? lon { get; set; }
+            public double? rsrp { get; set; }
+            public double? rsrq { get; set; }
+            public double? sinr { get; set; }
+            public string network { get; set; }
+            public DateTime? timestamp { get; set; }
+        }
+
+        public class PagedNetworkLogsResponse
+        {
+            public int Status { get; set; } = 1;
+            public int PageNumber { get; set; }
+            public int PageSize { get; set; }
+            public long TotalCount { get; set; }
+            public int TotalPages { get; set; }
+            public bool HasMore { get; set; }
+            public List<PagedNetworkLogItem> Items { get; set; } = new();
         }
 
         // ========================================
@@ -1237,7 +1373,7 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                     string fromKey = fromDate?.ToString("yyyyMMdd") ?? "*";
                     string toKey = toDate?.ToString("yyyyMMdd") ?? "*";
 
-                    string pattern = $"alllogs:{sessionKey}:{fromKey}:{toKey}:*";
+                    string pattern = $"alllogs:sql:*:{sessionKey}:{fromKey}:{toKey}:*";
                     deleted = await _redis.DeleteByPatternAsync(pattern);
 
                     Console.WriteLine($" Cleared {deleted} cache keys matching: {pattern}");
@@ -1345,6 +1481,11 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                 if (pageSize < 1) pageSize = 100;
                 if (pageSize > 10000) pageSize = 10000;
 
+                var cacheKey = $"alllogs:paged:{pageNumber}:{pageSize}";
+                var cached = await TryGetCachedObjectAsync<PagedNetworkLogsResponse>(cacheKey);
+                if (cached != null)
+                    return Json(cached);
+
                 var query = db.tbl_network_log
                     .AsNoTracking()
                     .Where(log => log.lat != null && log.lon != null);
@@ -1371,9 +1512,22 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                     })
                     .ToListAsync();
 
+                var typedItems = items.Select(item => new PagedNetworkLogItem
+                {
+                    id = Convert.ToInt64(item.id),
+                    session_id = Convert.ToInt64(item.session_id),
+                    lat = item.lat,
+                    lon = item.lon,
+                    rsrp = item.rsrp,
+                    rsrq = item.rsrq,
+                    sinr = item.sinr,
+                    network = item.network,
+                    timestamp = item.timestamp
+                }).ToList();
+
                 var totalPages = (int)Math.Ceiling(totalCount / (double)pageSize);
 
-                return Json(new
+                var response = new PagedNetworkLogsResponse
                 {
                     Status = 1,
                     PageNumber = pageNumber,
@@ -1381,8 +1535,12 @@ private int GetTargetCompanyId(int? explicitCompanyId)
                     TotalCount = totalCount,
                     TotalPages = totalPages,
                     HasMore = pageNumber < totalPages,
-                    Items = items
-                });
+                    Items = typedItems
+                };
+
+                await CacheObjectAsync(cacheKey, response, 300);
+
+                return Json(response);
             }
             catch (Exception ex)
             {
@@ -1847,12 +2005,18 @@ public async Task<IActionResult> OutdoorCount(
 
         // ---- helper: count with SAME filters as KPI (indoor/outdoor + networkType) ----
         private async Task<long> CountForKpiSqlAsync(string indoorColumn, bool isIndoor, string networkType, int companyId = 0)
-{
-    var conn = db.Database.GetDbConnection();
-    var shouldClose = false;
-    try
-    {
-        if (conn.State != ConnectionState.Open) { await conn.OpenAsync(); shouldClose = true; }
+	{
+	    var cacheKey = $"{(isIndoor ? "indoorcount" : "outdoorcount")}:{companyId}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}";
+
+	    var cached = await TryGetCachedLongAsync(cacheKey);
+	    if (cached.HasValue)
+	        return cached.Value;
+
+	    var conn = db.Database.GetDbConnection();
+	    var shouldClose = false;
+	    try
+	    {
+	        if (conn.State != ConnectionState.Open) { await conn.OpenAsync(); shouldClose = true; }
 
         var nt = NormalizeNetworkType(networkType);
         var netFilter = (string.IsNullOrEmpty(nt) || nt.Equals("All", StringComparison.OrdinalIgnoreCase))
@@ -1917,17 +2081,40 @@ public async Task<IActionResult> OutdoorCount(
             Add(cmd, "@companyId", companyId);
         }
 
-        var obj = await cmd.ExecuteScalarAsync();
-        return obj == null ? 0L : Convert.ToInt64(obj);
-    }
-    finally
-    {
-        if (shouldClose && conn.State == ConnectionState.Open) await conn.CloseAsync();
-    }
+	        var obj = await cmd.ExecuteScalarAsync();
+	        var value = obj == null ? 0L : Convert.ToInt64(obj);
+	        await CacheLongAsync(cacheKey, value, 300);
+	        return value;
+	    }
+	    finally
+	    {
+	        if (shouldClose && conn.State == ConnectionState.Open) await conn.CloseAsync();
+	    }
 }
-        // Indoor/outdoor KPIs by operator
-        private async Task<List<dynamic>> GetOperatorKpisSqlAsync(string networkType, string indoorColumn, bool isIndoor)
+        public class OperatorKpiRow
         {
+            public string name { get; set; }
+            public int samples { get; set; }
+            public double avg_rsrp { get; set; }
+            public double avg_rsrq { get; set; }
+            public double avg_sinr { get; set; }
+            public double avg_mos { get; set; }
+            public double avg_jitter { get; set; }
+            public double avg_latency { get; set; }
+            public double avg_packet_loss { get; set; }
+            public double avg_dl_tpt { get; set; }
+            public double avg_ul_tpt { get; set; }
+        }
+
+        // Indoor/outdoor KPIs by operator
+        private async Task<List<OperatorKpiRow>> GetOperatorKpisSqlAsync(string networkType, string indoorColumn, bool isIndoor)
+        {
+            var cacheKey = $"{(isIndoor ? "indoorkpis" : "outdoorkpis")}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}";
+
+            var cached = await TryGetCachedObjectAsync<List<OperatorKpiRow>>(cacheKey);
+            if (cached != null)
+                return cached;
+
             var conn = db.Database.GetDbConnection();
             var shouldClose = false;
             try
@@ -1977,11 +2164,11 @@ public async Task<IActionResult> OutdoorCount(
                     Add(cmd, "@net", nt);
                 }
 
-                var list = new List<dynamic>();
+                var list = new List<OperatorKpiRow>();
                 await using var rd = await cmd.ExecuteReaderAsync();
                 while (await rd.ReadAsync())
                 {
-                    list.Add(new
+                    list.Add(new OperatorKpiRow
                     {
                         name = rd.IsDBNull(0) ? "" : rd.GetString(0),
                         samples = rd.IsDBNull(1) ? 0 : Convert.ToInt32(rd.GetValue(1)),
@@ -1996,6 +2183,8 @@ public async Task<IActionResult> OutdoorCount(
                         avg_ul_tpt = Math.Round(rd.IsDBNull(10) ? 0d : Convert.ToDouble(rd.GetValue(10)), 2)
                     });
                 }
+
+                await CacheObjectAsync(cacheKey, list, 600);
                 return list;
             }
             finally
@@ -2004,21 +2193,21 @@ public async Task<IActionResult> OutdoorCount(
             }
         }
 
-        private static object BuildCompactKpiResponse(List<dynamic> list, string appliedNetworkType)
+        private static object BuildCompactKpiResponse(IEnumerable<OperatorKpiRow> list, string appliedNetworkType)
         {
             var operators = list.Select(x => new
             {
-                name = (string)x.name,
-                samples = (int)x.samples,
-                avg_rsrp = (double)x.avg_rsrp,
-                avg_rsrq = (double)x.avg_rsrq,
-                avg_sinr = (double)x.avg_sinr,
-                avg_mos = (double)x.avg_mos,
-                avg_jitter = (double)x.avg_jitter,
-                avg_latency = (double)x.avg_latency,
-                avg_packet_loss = (double)x.avg_packet_loss,
-                avg_dl_tpt = (double)x.avg_dl_tpt,
-                avg_ul_tpt = (double)x.avg_ul_tpt
+                name = x.name,
+                samples = x.samples,
+                avg_rsrp = x.avg_rsrp,
+                avg_rsrq = x.avg_rsrq,
+                avg_sinr = x.avg_sinr,
+                avg_mos = x.avg_mos,
+                avg_jitter = x.avg_jitter,
+                avg_latency = x.avg_latency,
+                avg_packet_loss = x.avg_packet_loss,
+                avg_dl_tpt = x.avg_dl_tpt,
+                avg_ul_tpt = x.avg_ul_tpt
             }).ToList();
 
             var totals = new { operatorCount = operators.Count, totalSamples = operators.Sum(o => o.samples) };
@@ -2045,6 +2234,12 @@ public async Task<IActionResult> OutdoorCount(
             bool isGood,
             string networkType)
         {
+            var cacheKey = $"{(isIndoor ? (isGood ? "indoorgoodcount" : "indoorbadcount") : (isGood ? "outdoorgoodcount" : "outdoorbadcount"))}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}";
+
+            var cached = await TryGetCachedLongAsync(cacheKey);
+            if (cached.HasValue)
+                return cached.Value;
+
             var conn = db.Database.GetDbConnection();
             var shouldClose = false;
 
@@ -2100,7 +2295,9 @@ public async Task<IActionResult> OutdoorCount(
                 }
 
                 var obj = await cmd.ExecuteScalarAsync();
-                return obj == null ? 0L : Convert.ToInt64(obj);
+                var value = obj == null ? 0L : Convert.ToInt64(obj);
+                await CacheLongAsync(cacheKey, value, 300);
+                return value;
             }
             finally
             {
@@ -2173,12 +2370,18 @@ public async Task<IActionResult> OutdoorCount(
             }
         }
 
-        private async Task<List<dynamic>> GetIndoorGoodBadPointsSqlAsync(
+        private async Task<List<object>> GetIndoorGoodBadPointsSqlAsync(
             bool isGood,
             string indoorColumn = "indoor_outdoor",
             string networkType = null,
             int maxRows = 1000)
         {
+            var cacheKey = $"{(isGood ? "indoorgoodlogs" : "indoorbadlogs")}:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}:{maxRows}";
+
+            var cached = await TryGetCachedObjectAsync<List<object>>(cacheKey);
+            if (cached != null)
+                return cached;
+
             var conn = db.Database.GetDbConnection();
             var shouldClose = false;
 
@@ -2230,7 +2433,7 @@ public async Task<IActionResult> OutdoorCount(
                     Add(cmd, "@net", nt);
                 }
 
-                var list = new List<dynamic>();
+                var list = new List<object>();
                 await using var rd = await cmd.ExecuteReaderAsync();
                 while (await rd.ReadAsync())
                 {
@@ -2243,6 +2446,7 @@ public async Task<IActionResult> OutdoorCount(
                     });
                 }
 
+                await CacheObjectAsync(cacheKey, list, 300);
                 return list;
             }
             finally
@@ -2320,12 +2524,18 @@ public async Task<IActionResult> OutdoorCount(
             }
         }
 
-        private async Task<List<dynamic>> GetAllIndoorSessionLogsSqlAsync(
+        private async Task<List<object>> GetAllIndoorSessionLogsSqlAsync(
             string networkType,
             string indoorColumn = "indoor_outdoor",
             int maxRows = 200000
         )
         {
+            var cacheKey = $"indoorallsessionlogs:{NormalizeCacheSegment(indoorColumn)}:{NormalizeCacheSegment(networkType)}:{maxRows}";
+
+            var cached = await TryGetCachedObjectAsync<List<object>>(cacheKey);
+            if (cached != null)
+                return cached;
+
             var conn = db.Database.GetDbConnection();
             var shouldClose = false;
 
@@ -2372,7 +2582,7 @@ public async Task<IActionResult> OutdoorCount(
                     Add(cmd, "@net", nt);
                 }
 
-                var list = new List<dynamic>();
+                var list = new List<object>();
                 await using var rd = await cmd.ExecuteReaderAsync();
                 while (await rd.ReadAsync())
                 {
@@ -2385,6 +2595,7 @@ public async Task<IActionResult> OutdoorCount(
                     });
                 }
 
+                await CacheObjectAsync(cacheKey, list, 300);
                 return list;
             }
             finally
@@ -2571,6 +2782,18 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
         });
     }
 
+    var cacheKey = $"sessions:list:{targetCompanyId}";
+    var cached = await TryGetCachedObjectAsync<List<object>>(cacheKey);
+    if (cached != null)
+    {
+        return Ok(new
+        {
+            Status = 1,
+            Source = "REDIS",
+            Data = cached
+        });
+    }
+
     // =========================================================
     // 2. EXECUTE SECURE QUERY
     // =========================================================
@@ -2612,6 +2835,8 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
                 operator_name = u.operator_name
             }
         ).ToListAsync();
+
+        await CacheObjectAsync(cacheKey, sessions.Select(x => (object)x).ToList(), 300);
 
         return Ok(new
         {
@@ -2791,6 +3016,8 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
                 if (rows == 0)
                     return NotFound(new { success = false, message = "Session not found" });
 
+                await InvalidateCalculatedCachesAsync();
+
                 return Ok(new
                 {
                     success = true,
@@ -2812,11 +3039,29 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
 
         #region Polygon Good / Bad Summary (RSRP based)
 
-        private async Task<List<dynamic>> GetPolygonGoodBadSummarySqlAsync(
+        public class PolygonGoodBadSummaryRow
+        {
+            public long id { get; set; }
+            public string name { get; set; }
+            public long? project_id { get; set; }
+            public double? area { get; set; }
+            public string region_wkt { get; set; }
+            public int good_count { get; set; }
+            public int bad_count { get; set; }
+            public int total_count { get; set; }
+        }
+
+        private async Task<List<PolygonGoodBadSummaryRow>> GetPolygonGoodBadSummarySqlAsync(
             double rsrpThreshold = -95,
             string networkType = null,
             long? projectId = null)
         {
+            var cacheKey = $"polygongoodbad:{rsrpThreshold.ToString(CultureInfo.InvariantCulture)}:{NormalizeCacheSegment(networkType)}:{projectId?.ToString(CultureInfo.InvariantCulture) ?? "all"}";
+
+            var cached = await TryGetCachedObjectAsync<List<PolygonGoodBadSummaryRow>>(cacheKey);
+            if (cached != null)
+                return cached;
+
             var conn = db.Database.GetDbConnection();
             var shouldClose = false;
 
@@ -2881,12 +3126,12 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
                     Add(cmd, "@pid", projectId.Value);
                 }
 
-                var list = new List<dynamic>();
+                var list = new List<PolygonGoodBadSummaryRow>();
                 await using var rd = await cmd.ExecuteReaderAsync();
 
                 while (await rd.ReadAsync())
                 {
-                    list.Add(new
+                    list.Add(new PolygonGoodBadSummaryRow
                     {
                         id = rd.GetInt64(0),
                         name = rd.IsDBNull(1) ? "" : rd.GetString(1),
@@ -2899,6 +3144,7 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
                     });
                 }
 
+                await CacheObjectAsync(cacheKey, list, 600);
                 return list;
             }
             finally
@@ -3741,27 +3987,35 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
             // Include CompanyID in cache key for isolation
             var cacheKey = $"NetDur:{targetCompanyId}:{fromDate:yyyyMMdd}:{toDate:yyyyMMdd}:{normalizedProvider ?? "ALL"}:{normalizedNetwork ?? "ALL"}";
 
-            // =========================================================
-            // 3. EXECUTE WITH CACHING
-            // =========================================================
-            var result = await _cache.GetOrCreateAsync(cacheKey, async e =>
+            var result = new List<object>();
+            var conn = db.Database.GetDbConnection();
+            var shouldClose = false;
+
+            try
             {
-                e.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5);
-
-                var conn = db.Database.GetDbConnection();
-                var shouldClose = false;
-
-                try
+                var cached = await TryGetCachedObjectAsync<List<object>>(cacheKey);
+                if (cached != null)
                 {
-                    if (conn.State != System.Data.ConnectionState.Open)
+                    return Ok(new
                     {
-                        await conn.OpenAsync();
-                        shouldClose = true;
-                    }
+                        Status = 1,
+                        CompanyID = targetCompanyId,
+                        FromDate = fromDate,
+                        ToDate = toDate,
+                        ProviderFilter = provider,
+                        NetworkFilter = network,
+                        Count = cached.Count,
+                        Data = cached
+                    });
+                }
 
-                    // --- UPDATED SQL WITH COMPANY SECURITY JOIN ---
-                    // We join tbl_network_log -> tbl_session -> tbl_user -> company_id
-                    var sql = @"
+                if (conn.State != System.Data.ConnectionState.Open)
+                {
+                    await conn.OpenAsync();
+                    shouldClose = true;
+                }
+
+                var sql = @"
                 SELECT
                     t.provider_name,
                     t.network,
@@ -3782,12 +4036,10 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
                     FROM tbl_network_log l
                     JOIN tbl_session s ON l.session_id = s.id
                     JOIN tbl_user u ON s.user_id = u.id
-                    WHERE (@companyId = 0 OR u.company_id = @companyId)  -- <--- SECURITY FILTER
+                    WHERE (@companyId = 0 OR u.company_id = @companyId)
                       AND (@fromDate IS NULL OR l.timestamp >= @fromDate)
                       AND (@toDate   IS NULL OR l.timestamp <= @toDate)
-                      -- provider: case-insensitive + partial match
                       AND (@provider IS NULL OR LOWER(l.m_alpha_long) LIKE CONCAT('%', @provider, '%'))
-                      -- network: case-insensitive exact match
                       AND (@network  IS NULL OR LOWER(l.network) = @network)
                 ) AS t
                 WHERE t.time_diff_seconds IS NOT NULL
@@ -3795,70 +4047,56 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
                 GROUP BY t.provider_name, t.network
                 ORDER BY total_duration_seconds DESC;";
 
-                    await using var cmd = conn.CreateCommand();
-                    cmd.CommandText = sql;
-                    cmd.CommandTimeout = 300;
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = sql;
+                cmd.CommandTimeout = 300;
 
-                    // Add Parameters
-                    Add(cmd, "@companyId", targetCompanyId);
-                    Add(cmd, "@fromDate", fromDate);
-                    Add(cmd, "@toDate", toDate);
-                    Add(cmd, "@provider", normalizedProvider);
-                    Add(cmd, "@network", normalizedNetwork);
+                Add(cmd, "@companyId", targetCompanyId);
+                Add(cmd, "@fromDate", fromDate);
+                Add(cmd, "@toDate", toDate);
+                Add(cmd, "@provider", normalizedProvider);
+                Add(cmd, "@network", normalizedNetwork);
 
-                    var list = new List<object>();
-
-                    await using var reader = await cmd.ExecuteReaderAsync();
-                    while (await reader.ReadAsync())
-                    {
-                        string providerVal = reader.IsDBNull(0) ? null : reader.GetString(0);
-                        string networkVal = reader.IsDBNull(1) ? null : reader.GetString(1);
-                        long durationSeconds = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
-
-                        list.Add(new
-                        {
-                            Provider = providerVal,
-                            Network = networkVal,
-                            TotalDurationSeconds = durationSeconds,
-                            TotalDurationMinutes = Math.Round(durationSeconds / 60.0, 2),
-                            TotalDurationHours = Math.Round(durationSeconds / 3600.0, 2)
-                        });
-                    }
-
-                    return new ReturnAPIResponse { Status = 1, Data = list };
-                }
-                catch (Exception ex)
+                await using var reader = await cmd.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
                 {
-                    // Log Error here if needed
-                    return new ReturnAPIResponse
-                    {
-                        Status = 0,
-                        Message = $"Error calculating network durations: {ex.Message}"
-                    };
-                }
-                finally
-                {
-                    if (shouldClose && conn.State == System.Data.ConnectionState.Open)
-                        await conn.CloseAsync();
-                }
-            });
+                    string providerVal = reader.IsDBNull(0) ? null : reader.GetString(0);
+                    string networkVal = reader.IsDBNull(1) ? null : reader.GetString(1);
+                    long durationSeconds = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
 
-            if (result.Status == 1)
-            {
+                    result.Add(new
+                    {
+                        Provider = providerVal,
+                        Network = networkVal,
+                        TotalDurationSeconds = durationSeconds,
+                        TotalDurationMinutes = Math.Round(durationSeconds / 60.0, 2),
+                        TotalDurationHours = Math.Round(durationSeconds / 3600.0, 2)
+                    });
+                }
+
+                await CacheObjectAsync(cacheKey, result, 300);
+
                 return Ok(new
                 {
                     Status = 1,
-                    CompanyID = targetCompanyId, // Helpful for debugging
+                    CompanyID = targetCompanyId,
                     FromDate = fromDate,
                     ToDate = toDate,
                     ProviderFilter = provider,
                     NetworkFilter = network,
-                    Count = (result.Data as List<object>)?.Count ?? 0,
-                    Data = result.Data
+                    Count = result.Count,
+                    Data = result
                 });
             }
-
-            return StatusCode(500, new { Status = 0, Message = result.Message });
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { Status = 0, Message = $"Error calculating network durations: {ex.Message}" });
+            }
+            finally
+            {
+                if (shouldClose && conn.State == System.Data.ConnectionState.Open)
+                    await conn.CloseAsync();
+            }
         }
         public class CoverageHoleDto
         {
@@ -3943,6 +4181,28 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
                 }
             }
 
+            var thresholdHash = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(raw)));
+            var cacheKey = $"coverageholes:{threshold.id}:{thresholdHash}";
+
+            var cached = await TryGetCachedObjectAsync<List<object>>(cacheKey);
+            if (cached != null)
+            {
+                return Ok(new
+                {
+                    Status = 1,
+                    Message = "Coverage holes fetched successfully",
+                    ThresholdUsed = new
+                    {
+                        rsrp = rsrpThreshold,
+                        rsrq = rsrqThreshold
+                    },
+                    Count = cached.Count,
+                    Data = cached
+                });
+            }
+
             // =====================================
             // 3? Query tbl_network_log (ONLY DB DATA)
             // =====================================
@@ -3981,6 +4241,8 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
                 })
                 .Take(5000)
                 .ToListAsync();
+
+            await CacheObjectAsync(cacheKey, data.Select(x => (object)x).ToList(), 300);
 
             // =====================================
             // 5? Final response
