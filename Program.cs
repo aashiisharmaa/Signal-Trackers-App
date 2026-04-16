@@ -44,6 +44,8 @@ internal class Program
                         "http://192.168.1.82:5173",
                         "http://192.168.1.147:5173",
                         "http://localhost:5173",
+                        "http://127.0.0.1:5173",
+                        "http://0.0.0.0:5173",
                         "https://singnaltracker.netlify.app",
                         "https://stracer.vinfocom.co.in"
                     )
@@ -154,8 +156,9 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
             options.Cookie.Name = "st.session";
             options.Cookie.HttpOnly = true;
             options.Cookie.IsEssential = true;
-            options.Cookie.SameSite = SameSiteMode.None;
-            options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+            // Keep cookies usable on localhost and same-site subdomains.
+            options.Cookie.SameSite = SameSiteMode.Lax;
+            options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
         });
 
         // ----------------------------------------------------
@@ -166,8 +169,9 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
             {
                 options.Cookie.Name = "st.auth";
                 options.Cookie.HttpOnly = true;
-                options.Cookie.SameSite = SameSiteMode.None;
-                options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+                // Keep cookies usable on localhost and same-site subdomains.
+                options.Cookie.SameSite = SameSiteMode.Lax;
+                options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
                 options.ExpireTimeSpan = TimeSpan.FromMinutes(300);
                 options.SlidingExpiration = true;
 
@@ -207,9 +211,9 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
         // ----------------------------------------------------
         builder.Services.Configure<CookiePolicyOptions>(o =>
         {
-            o.MinimumSameSitePolicy = SameSiteMode.None;
+            o.MinimumSameSitePolicy = SameSiteMode.Lax;
             o.HttpOnly = HttpOnlyPolicy.Always;
-            o.Secure = CookieSecurePolicy.Always;
+            o.Secure = CookieSecurePolicy.SameAsRequest;
         });
 
         // ----------------------------------------------------
