@@ -68,6 +68,12 @@ namespace SignalTracker.Models
             return await _db.StringSetAsync(key, value, TimeSpan.FromSeconds(ttlSeconds));
         }
 
+        public async Task<bool> TrySetStringAsync(string key, string value, int ttlSeconds = 300)
+        {
+            if (_db == null) return false;
+            return await _db.StringSetAsync(key, value, TimeSpan.FromSeconds(ttlSeconds), when: When.NotExists);
+        }
+
         public async Task<bool> DeleteAsync(string key)
         {
             if (_db == null) return false;

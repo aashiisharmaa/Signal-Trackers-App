@@ -11,7 +11,6 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.Extensions.Configuration;
 
 using SignalTracker.Models; 
-using Microsoft.Extensions.Caching.Memory;
 using SignalTracker.Services;
 
 namespace SignalTracker.Controllers
@@ -20,24 +19,27 @@ namespace SignalTracker.Controllers
     [Route("api/auth")]
     public class AuthController : ControllerBase
     {
+        private const string GlobalLoginLockKey = "auth:global-login-lock";
+        private const int GlobalLoginLockTtlSeconds = 18000;
+
         private readonly ApplicationDbContext _db;
         private readonly ILogger<AuthController> _logger;
         private readonly IConfiguration _configuration;
-        private readonly IMemoryCache _cache;
         private readonly LicenseFeatureService _licenseFeatureService;
+        private readonly RedisService _redis;
 
         public AuthController(
             ApplicationDbContext db,
             ILogger<AuthController> logger,
             IConfiguration configuration,
-            IMemoryCache cache,
-            LicenseFeatureService licenseFeatureService)
+            LicenseFeatureService licenseFeatureService,
+            RedisService redis)
         {
             _db = db;
             _logger = logger;
             _configuration = configuration;
-            _cache = cache;
             _licenseFeatureService = licenseFeatureService;
+            _redis = redis;
         }
 
         private sealed class LoginUserDto
@@ -119,61 +121,107 @@ namespace SignalTracker.Controllers
                 return Unauthorized(new { message = "Invalid email or password" });
             }
 
-            if (_cache.TryGetValue($"active_session_{user.id}", out _))
+            if (_redis?.IsConnected != true)
             {
-                return Unauthorized(new { message = "This account is already logged in on another device." });
+                return StatusCode(503, new { message = "Login service is temporarily unavailable. Please try again." });
+            }
+
+            var lockValue = $"{user.id}:{user.email}:{DateTimeOffset.UtcNow:O}";
+            var lockAcquired = await _redis.TrySetStringAsync(GlobalLoginLockKey, lockValue, GlobalLoginLockTtlSeconds);
+            if (!lockAcquired)
+            {
+                return Unauthorized(new { message = "Sorry, someone is already logged in. Please try again later." });
             }
 
             var resolvedCountryCode = (string.IsNullOrWhiteSpace(user.country_code) ? loginSource : user.country_code).Trim().ToUpperInvariant();
+            var loginCompleted = false;
 
             // 2. Create claims. CRITICAL: Include 'country_code' so the provider knows which DB to use next.
-            var claims = new List<Claim>
+            try
             {
-                new Claim(ClaimTypes.Email, user.email),
-                new Claim(ClaimTypes.Name, user.name ?? ""),
-                new Claim("country_code", resolvedCountryCode), // This drives the dynamic switch
-                new Claim("m_user_type_id", user.m_user_type_id.ToString()),
-                new Claim("UserId", user.id.ToString()),
-                new Claim("UserTypeId", user.m_user_type_id.ToString()),
-                new Claim("CompanyId", user.company_id?.ToString() ?? "0")
-            };
+                var enabledFeatures = await _licenseFeatureService.GetEnabledFeaturesForUserAsync(user.id);
 
-            var claimsIdentity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
-
-            // 3. Sign in the user with the claims
-            await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
-            HttpContext.Session.Clear();
-
-            await HttpContext.SignInAsync(
-                CookieAuthenticationDefaults.AuthenticationScheme,
-                new ClaimsPrincipal(claimsIdentity),
-                new AuthenticationProperties { IsPersistent = true });
-
-            HttpContext.Session.SetString("country_code", resolvedCountryCode);
-            HttpContext.Session.SetString("UserName", user.email ?? string.Empty);
-            HttpContext.Session.SetInt32("UserID", user.id);
-            HttpContext.Session.SetInt32("UserType", user.m_user_type_id);
-
-            _cache.Set($"active_session_{user.id}", true, DateTimeOffset.UtcNow.AddHours(5));
-
-            var enabledFeatures = await _licenseFeatureService.GetEnabledFeaturesForUserAsync(user.id);
-
-            return Ok(new
-            {
-                message = "Login successful",
-                country = resolvedCountryCode,
-                source_db = loginSource,
-                user = new
+                var claims = new List<Claim>
                 {
-                    user.id,
-                    user.email,
-                    user.name,
-                    user.m_user_type_id,
-                    user.company_id,
-                    user.country_code,
-                    enabled_features = enabledFeatures
+                    new Claim(ClaimTypes.Email, user.email),
+                    new Claim(ClaimTypes.Name, user.name ?? ""),
+                    new Claim("country_code", resolvedCountryCode), // This drives the dynamic switch
+                    new Claim("m_user_type_id", user.m_user_type_id.ToString()),
+                    new Claim("UserId", user.id.ToString()),
+                    new Claim("UserTypeId", user.m_user_type_id.ToString()),
+                    new Claim("CompanyId", user.company_id?.ToString() ?? "0")
+                };
+
+                var claimsIdentity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
+
+                // 3. Sign in the user with the claims
+                await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+                HttpContext.Session.Clear();
+
+                await HttpContext.SignInAsync(
+                    CookieAuthenticationDefaults.AuthenticationScheme,
+                    new ClaimsPrincipal(claimsIdentity),
+                    new AuthenticationProperties { IsPersistent = true });
+
+                HttpContext.Session.SetString("country_code", resolvedCountryCode);
+                HttpContext.Session.SetString("UserName", user.email ?? string.Empty);
+                HttpContext.Session.SetInt32("UserID", user.id);
+                HttpContext.Session.SetInt32("UserType", user.m_user_type_id);
+                loginCompleted = true;
+
+                return Ok(new
+                {
+                    message = "Login successful",
+                    country = resolvedCountryCode,
+                    source_db = loginSource,
+                    user = new
+                    {
+                        user.id,
+                        user.email,
+                        user.name,
+                        user.m_user_type_id,
+                        user.company_id,
+                        user.country_code,
+                        enabled_features = enabledFeatures
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                if (!loginCompleted)
+                {
+                    try
+                    {
+                        await _redis.DeleteAsync(GlobalLoginLockKey);
+                    }
+                    catch { }
                 }
-            });
+
+                _logger.LogError(ex, "Error during login for {Email}", model.Email);
+                return StatusCode(500, new { message = "An error occurred. Please try again." });
+            }
+        }
+
+        [HttpPost("logout")]
+        public async Task<IActionResult> Logout()
+        {
+            try
+            {
+                if (_redis?.IsConnected == true)
+                {
+                    await _redis.DeleteAsync(GlobalLoginLockKey);
+                }
+
+                await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+                HttpContext.Session.Clear();
+
+                return Ok(new { success = true, message = "Logged out successfully." });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error during logout");
+                return StatusCode(500, new { success = false, message = "An error occurred. Please try again." });
+            }
         }
 
         [Authorize]

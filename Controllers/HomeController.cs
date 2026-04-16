@@ -9,7 +9,6 @@ using Microsoft.AspNetCore.Authentication;
 using System.Security.Claims;
 using SignalTracker.Helper;
 using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Caching.Memory;
 using SignalTracker.Services;
 
 namespace SignalTracker.Controllers
@@ -17,29 +16,32 @@ namespace SignalTracker.Controllers
     [Route("Home")]
     public class HomeController : Controller
     {
+        private const string GlobalLoginLockKey = "auth:global-login-lock";
+        private const int GlobalLoginLockTtlSeconds = 18000;
+
         private readonly ApplicationDbContext _db;
         private readonly CommonFunction? _cf = null;
         private readonly ILogger<HomeController> _logger;
         private readonly IConfiguration _configuration;
-        private readonly IMemoryCache _cache;
         private readonly IHttpContextAccessor _httpContextAccessor;
         private readonly LicenseFeatureService _licenseFeatureService;
+        private readonly RedisService _redis;
 
         public HomeController(
             ApplicationDbContext context,
             IHttpContextAccessor httpContextAccessor,
             ILogger<HomeController> logger,
             IConfiguration configuration,
-            IMemoryCache cache,
-            LicenseFeatureService licenseFeatureService)
+            LicenseFeatureService licenseFeatureService,
+            RedisService redis)
         {
             _db = context;
             _cf = new CommonFunction(context, httpContextAccessor);
             _logger = logger;
             _configuration = configuration;
-            _cache = cache;
             _httpContextAccessor = httpContextAccessor;
             _licenseFeatureService = licenseFeatureService;
+            _redis = redis;
         }
 
         [HttpGet("")]
@@ -133,6 +135,8 @@ namespace SignalTracker.Controllers
         public async Task<JsonResult> UserLogin([FromBody] LoginData obj)
         {
             var sw = Stopwatch.StartNew();
+            bool lockAcquired = false;
+            bool loginCompleted = false;
             try
             {
                 if (obj == null || string.IsNullOrWhiteSpace(obj.Email) || string.IsNullOrWhiteSpace(obj.Password))
@@ -175,12 +179,21 @@ namespace SignalTracker.Controllers
                     }
                 }
 
-                if (_cache.TryGetValue($"active_session_{user!.id}", out _))
+                if (_redis?.IsConnected != true)
                 {
-                    return Json(new { success = false, message = "This account is already logged in on another device." });
+                    return Json(new { success = false, message = "Login service is temporarily unavailable. Please try again." });
+                }
+
+                var lockValue = $"{user!.id}:{user.email}:{DateTimeOffset.UtcNow:O}";
+                lockAcquired = await _redis.TrySetStringAsync(GlobalLoginLockKey, lockValue, GlobalLoginLockTtlSeconds);
+                if (!lockAcquired)
+                {
+                    return Json(new { success = false, message = "Sorry, someone is already logged in. Please try again later." });
                 }
 
                 var resolvedCountryCode = (string.IsNullOrWhiteSpace(user.country_code) ? loginSource : user.country_code).Trim().ToUpperInvariant();
+
+                var enabledFeatures = await _licenseFeatureService.GetEnabledFeaturesForUserAsync(user.id);
 
                 var claims = new List<Claim>
                 {
@@ -214,9 +227,7 @@ namespace SignalTracker.Controllers
                 HttpContext.Session.SetInt32("UserID", user.id);
                 HttpContext.Session.SetInt32("UserType", user.m_user_type_id);
                 HttpContext.Session.SetString("country_code", resolvedCountryCode);
-
-                _cache.Set($"active_session_{user.id}", true, DateTimeOffset.UtcNow.AddHours(5));
-                var enabledFeatures = await _licenseFeatureService.GetEnabledFeaturesForUserAsync(user.id);
+                loginCompleted = true;
 
                 return Json(new
                 {
@@ -237,6 +248,16 @@ namespace SignalTracker.Controllers
             }
             catch (Exception ex)
             {
+                if (lockAcquired && !loginCompleted)
+                {
+                    try
+                    {
+                        if (_redis?.IsConnected == true)
+                            await _redis.DeleteAsync(GlobalLoginLockKey);
+                    }
+                    catch { }
+                }
+
                 var writelog = new Writelog(_db);
                 writelog.write_exception_log(0, "Home", "UserLogin", DateTime.Now, ex);
                 return Json(new { success = false, message = "An error occurred. Please try again." });
@@ -391,11 +412,11 @@ namespace SignalTracker.Controllers
                     await _db.SaveChangesAsync();
                 }
 
-                var userId = HttpContext?.Session.GetInt32("UserID");
-                if (userId.HasValue)
+                if (_redis?.IsConnected == true)
                 {
-                    _cache.Remove($"active_session_{userId.Value}");
+                    await _redis.DeleteAsync(GlobalLoginLockKey);
                 }
+
             }
             catch { /* Log error */ }
 
