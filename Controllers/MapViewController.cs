@@ -36,6 +36,18 @@ namespace SignalTracker.Controllers
         private readonly CommonFunction cf;
         private readonly RedisService _redis;
         private readonly UserScopeService _userScope;
+        private const int MapViewCacheTtlSeconds = 300;
+        private static readonly string[] MapViewCacheInvalidationPatterns =
+        {
+            "mapview:*",
+            "projectpolygons:*",
+            "availablepolygons:*",
+            "networklog:v2:*",
+            "latlon:dist:*",
+            "n78_simple_kpi:*",
+            "n78_neighbours:*",
+            "daterangelog:*"
+        };
 
         public MapViewController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor, IWebHostEnvironment env, RedisService redis,UserScopeService userScope)
         {
@@ -44,6 +56,94 @@ namespace SignalTracker.Controllers
             cf = new CommonFunction(context, httpContextAccessor);
             _redis = redis;
             _userScope = userScope;
+        }
+
+        private string BuildMapViewCacheKey(string endpoint, params object?[] parts)
+        {
+            var tokens = parts.Select(NormalizeCacheKeyPart);
+            return $"mapview:{NormalizeCacheKeyPart(endpoint)}:{string.Join(":", tokens)}";
+        }
+
+        private static string NormalizeCacheKeyPart(object? value)
+        {
+            if (value == null)
+                return "null";
+
+            if (value is DateTime dt)
+                return dt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
+            if (value is DateTimeOffset dto)
+                return dto.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
+            if (value is bool b)
+                return b ? "1" : "0";
+
+            if (value is System.Collections.IEnumerable enumerable && value is not string)
+            {
+                var items = new List<string>();
+                foreach (var item in enumerable)
+                {
+                    items.Add(NormalizeCacheKeyPart(item));
+                }
+
+                return items.Count == 0
+                    ? "empty"
+                    : string.Join(",", items.OrderBy(x => x, StringComparer.Ordinal));
+            }
+
+            var text = Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(text))
+                return "empty";
+
+            return Regex.Replace(text.Trim().ToLowerInvariant(), @"[^a-z0-9_\-\.]+", "_");
+        }
+
+        private async Task<T?> TryGetMapViewCacheAsync<T>(string cacheKey) where T : class
+        {
+            if (_redis?.IsConnected != true)
+                return null;
+
+            try
+            {
+                return await _redis.GetObjectAsync<T>(cacheKey);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private async Task SetMapViewCacheAsync<T>(string cacheKey, T value, int ttlSeconds = MapViewCacheTtlSeconds) where T : class
+        {
+            if (_redis?.IsConnected != true)
+                return;
+
+            try
+            {
+                await _redis.SetObjectAsync(cacheKey, value, ttlSeconds);
+            }
+            catch
+            {
+                // Best effort only.
+            }
+        }
+
+        private async Task InvalidateMapViewCachesAsync()
+        {
+            if (_redis?.IsConnected != true)
+                return;
+
+            foreach (var pattern in MapViewCacheInvalidationPatterns)
+            {
+                try
+                {
+                    await _redis.DeleteByPatternAsync(pattern);
+                }
+                catch
+                {
+                    // Best effort only.
+                }
+            }
         }
 
         // =========================================================================
@@ -280,6 +380,7 @@ namespace SignalTracker.Controllers
                 };
                 db.tbl_session.Add(newSess);
                 await db.SaveChangesAsync();
+                await InvalidateMapViewCachesAsync();
 
                 message.Status = 1; message.Message = "Session Started.";
                 message.Data = new { sessionid = newSess.id };
@@ -326,6 +427,7 @@ namespace SignalTracker.Controllers
                 existingSession.distance = model.distance;
 
                 await db.SaveChangesAsync();
+                await InvalidateMapViewCachesAsync();
                 message.Status = 1; message.Message = "Session Ended.";
             }
             catch (Exception ex) { message.Status = 0; message.Message = "Error: " + ex.Message; }
@@ -682,6 +784,7 @@ public class ProjectPolygonItem
                 }
 
                 await tx.CommitAsync();
+                await InvalidateMapViewCachesAsync();
 
                 return Ok(new
                 {
@@ -1008,6 +1111,7 @@ public class ProjectPolygonItem
                 AddParam(cmd, "@area", (object?)model.Area ?? DBNull.Value);
 
                 await cmd.ExecuteNonQueryAsync();
+                await InvalidateMapViewCachesAsync();
 
                 message.Status = 1;
                 message.Message = "Polygon saved successfully.";
@@ -1250,6 +1354,14 @@ public async Task<IActionResult> GetAvailablePolygons(
                     return BadRequest(new { message = "Provide a valid sessionId or comma-separated sessionIds/session_ids." });
                 }
 
+                var cacheKey = BuildMapViewCacheKey(
+                    "subsession",
+                    requestedSessionIds.Count > 0 ? string.Join("-", requestedSessionIds) : "all");
+
+                var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+                if (cached != null)
+                    return Json(cached);
+
                 var sql = @"
                     SELECT
                         session_id,
@@ -1368,12 +1480,15 @@ public async Task<IActionResult> GetAvailablePolygons(
                     .Select(x => x.ToResponse())
                     .ToList();
 
-                return Json(new
+                var response = new
                 {
                     requested_session_ids = requestedSessionIds,
                     data = sessions,
                     summary = overall.ToMetricsResponse()
-                });
+                };
+
+                await SetMapViewCacheAsync(cacheKey, response);
+                return Json(response);
             }
             catch (Exception ex)
             {
@@ -1455,6 +1570,11 @@ public class AvailablePolygonsResponse
         {
             try
             {
+                var cacheKey = BuildMapViewCacheKey("polygon-log-count", polygonId, from, to);
+                var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+                if (cached != null)
+                    return Json(cached);
+
                 IQueryable<tbl_network_log> q = db.tbl_network_log.Where(l => l.polygon_id == polygonId);
 
                 if (from.HasValue)
@@ -1467,7 +1587,9 @@ public class AvailablePolygonsResponse
                 DateTime? first = await q.MinAsync(l => l.timestamp);
                 DateTime? last = await q.MaxAsync(l => l.timestamp);
 
-                return Json(new { polygonId, total, from, to, first, last });
+                var response = new { polygonId, total, from, to, first, last };
+                await SetMapViewCacheAsync(cacheKey, response);
+                return Json(response);
             }
             catch (Exception ex)
             {
@@ -1628,6 +1750,7 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
 
                 polygon.tbl_project_id = projectId;
                 await db.SaveChangesAsync();
+                await InvalidateMapViewCachesAsync();
 
                 message.Status = 1;
                 message.Message = "Polygon linked to project.";
@@ -2355,6 +2478,7 @@ public async Task<IActionResult> DeleteProject([FromQuery] int projectId)
                 // Commit all changes atomically
                 await db.SaveChangesAsync();
                 await transaction.CommitAsync();
+                await InvalidateMapViewCachesAsync();
             }
             catch
             {
@@ -2412,6 +2536,11 @@ public async Task<IActionResult> GetCombinedProviderNetworkTime(
 
     try
     {
+        var cacheKey = BuildMapViewCacheKey("combined-provider-network-time", sessionIdList);
+        var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+        if (cached != null)
+            return Ok(cached);
+
         var logs = await db.tbl_network_log
             .AsNoTracking()
             .Where(x =>
@@ -2433,7 +2562,9 @@ public async Task<IActionResult> GetCombinedProviderNetworkTime(
 
         if (logs.Count < 2)
         {
-            return Ok(new { message = "Not enough data" });
+            var empty = new { message = "Not enough data" };
+            await SetMapViewCacheAsync(cacheKey, empty);
+            return Ok(empty);
         }
 
         // provider|network => totalSeconds
@@ -2519,7 +2650,9 @@ public async Task<IActionResult> GetCombinedProviderNetworkTime(
         .OrderByDescending(x => x.timeSeconds)
         .ToList();
 
-        return Ok(new { data = response });
+        var payload = new { data = response };
+        await SetMapViewCacheAsync(cacheKey, payload);
+        return Ok(payload);
     }
     catch (Exception ex)
     {
@@ -2542,6 +2675,10 @@ public async Task<IActionResult> GetKpiDistribution(
         return BadRequest("sessionIds are required");
 
     string ids = sessionIds;
+    var cacheKey = BuildMapViewCacheKey("kpi-distribution", ids, kpi ?? "all");
+    var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+    if (cached != null)
+        return Ok(cached);
 
     // 🔹 KPI → SQL Expression Map (RSRP FIXED)
     var kpiMap = new Dictionary<string, (string expr, string column)>
@@ -2594,12 +2731,14 @@ public async Task<IActionResult> GetKpiDistribution(
         var (expr, column) = kpiMap[kpi];
         var data = await RunQuery(expr, column);
 
-        return Ok(new
+        var response = new
         {
             Status = 1,
             KPI = kpi,
             Data = data
-        });
+        };
+        await SetMapViewCacheAsync(cacheKey, response);
+        return Ok(response);
     }
 
     // 🔹 ALL KPIs
@@ -2610,11 +2749,13 @@ public async Task<IActionResult> GetKpiDistribution(
         allData[item.Key] = await RunQuery(item.Value.expr, item.Value.column);
     }
 
-    return Ok(new
+    var allResponse = new
     {
         Status = 1,
         Data = allData
-    });
+    };
+    await SetMapViewCacheAsync(cacheKey, allResponse);
+    return Ok(allResponse);
 }
 
 [HttpGet("lat-lon-distribution")]
@@ -3515,6 +3656,16 @@ public async Task<JsonResult> GetProviderWiseVolume([FromQuery] MapFilter filter
 
     try
     {
+        var cacheKey = BuildMapViewCacheKey(
+            "provider-wise-volume",
+            sessionIdsParam,
+            filters?.StartDate,
+            filters?.EndDate,
+            filters?.NetworkType ?? "all");
+        var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+        if (cached != null)
+            return Json(cached);
+
         using var conn = db.Database.GetDbConnection();
         if (conn.State != ConnectionState.Open)
             await conn.OpenAsync();
@@ -3666,11 +3817,13 @@ GROUP BY session_id, provider, tech;
             };
         }
 
-        return Json(new
+        var response = new
         {
             status = 1,
             tpt_provider_summary = summary
-        });
+        };
+        await SetMapViewCacheAsync(cacheKey, response);
+        return Json(response);
     }
     catch (Exception ex)
     {
@@ -3695,17 +3848,24 @@ public async Task<IActionResult> GetTotalSessionDistance(
         .Select(int.Parse)
         .ToList();
 
+    var cacheKey = BuildMapViewCacheKey("sessions-distance", sessionIds);
+    var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+    if (cached != null)
+        return Ok(cached);
+
     var totalDistance = await db.tbl_session
         .AsNoTracking()  
         .Where(x => ids.Contains((int)x.id) && x.distance != null)
         .SumAsync(x => (double?)x.distance) ?? 0;
 
-    return Ok(new
+    var response = new
     {
         Status = 1,
         SessionCount = ids.Count,
         TotalDistanceKm = Math.Round(totalDistance, 2)
-    });
+    };
+    await SetMapViewCacheAsync(cacheKey, response);
+    return Ok(response);
 }
 
 private (double? lat, double? lon) ApplyMeterOffset(double? lat, double? lon, double meters)
@@ -3768,6 +3928,27 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
 
             if (targetCompanyId == 0)
                 return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
+        }
+
+        var cacheKey = BuildMapViewCacheKey(
+            "neighbour-logs-date-range",
+            targetCompanyId,
+            filters.StartDate,
+            filters.StartTime,
+            filters.EndDate,
+            filters.EndTime,
+            filters.Provider,
+            filters.PolygonId,
+            filters.CursorTs);
+
+        var cached = await TryGetMapViewCacheAsync<DateRangeLogResponse>(cacheKey);
+        if (cached != null)
+        {
+            sw.Stop();
+            Response.Headers["X-Cache"] = "HIT";
+            Response.Headers["X-Total-Ms"] = sw.ElapsedMilliseconds.ToString();
+            Response.Headers["X-Row-Count"] = cached.data.Count.ToString();
+            return Json(cached);
         }
 
         // ==============================
@@ -3864,12 +4045,19 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
 
         if (rows.Count == 0)
         {
-            return Json(new DateRangeLogResponse
+            var emptyResponse = new DateRangeLogResponse
             {
                 data = new List<DateRangeLogItem>(),
                 app_summary = new Dictionary<string, object>(),
                 next_cursor = null
-            });
+            };
+
+            await SetMapViewCacheAsync(cacheKey, emptyResponse, 60);
+
+            Response.Headers["X-Cache"] = "MISS";
+            Response.Headers["X-Total-Ms"] = sw.ElapsedMilliseconds.ToString();
+            Response.Headers["X-Row-Count"] = "0";
+            return Json(emptyResponse);
         }
 
         // ==============================
@@ -3973,8 +4161,11 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
             next_cursor = rows.Last().timestamp
         };
 
+        await SetMapViewCacheAsync(cacheKey, response);
+
         Response.Headers["X-Total-Ms"] = sw.ElapsedMilliseconds.ToString();
         Response.Headers["X-Row-Count"] = rows.Count.ToString();
+        Response.Headers["X-Cache"] = "MISS";
 
         return Json(response);
     }
@@ -4351,6 +4542,18 @@ public async Task<IActionResult> GetTotalUsageTime(
         var endDateTime = filter.EndDate.Date
             .Add(filter.EndTime ?? new TimeSpan(23, 59, 59));
 
+        var cacheKey = BuildMapViewCacheKey(
+            "total-usage-time",
+            filter.StartDate,
+            filter.EndDate,
+            filter.StartTime,
+            filter.EndTime,
+            filter.Operator,
+            filter.Technology);
+        var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+        if (cached != null)
+            return Ok(cached);
+
         // =====================================
         // 2️ Base query (PRIMARY only)
         // =====================================
@@ -4386,14 +4589,16 @@ public async Task<IActionResult> GetTotalUsageTime(
 
         if (logs.Count < 2)
         {
-            return Ok(new
+            var empty = new
             {
                 StartDateTime = startDateTime,
                 EndDateTime = endDateTime,
                 TotalSeconds = 0,
                 TotalTime = "00:00:00",
                 Breakdown = new List<object>()
-            });
+            };
+            await SetMapViewCacheAsync(cacheKey, empty);
+            return Ok(empty);
         }
 
         // =====================================
@@ -4481,14 +4686,16 @@ public async Task<IActionResult> GetTotalUsageTime(
 
         int totalSec = (int)totalSeconds;
 
-        return Ok(new
+        var response = new
         {
             StartDateTime = startDateTime,
             EndDateTime = endDateTime,
             TotalSeconds = totalSec,
             TotalTime = $"{totalSec / 3600:D2}:{(totalSec % 3600) / 60:D2}:{totalSec % 60:D2}",
             Breakdown = breakdownList
-        });
+        };
+        await SetMapViewCacheAsync(cacheKey, response);
+        return Ok(response);
     }
     catch (Exception ex)
     {
@@ -4603,6 +4810,16 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
         string? operatorFilter = filter.Operator?.Trim().ToLower();
         string? techFilter = filter.Technology?.Trim().ToUpper();
 
+        var cacheKey = BuildMapViewCacheKey(
+            "indoor-outdoor-session-analytics",
+            filter.SessionIds,
+            indoorFilter ?? "all",
+            operatorFilter ?? "all",
+            techFilter ?? "all");
+        var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+        if (cached != null)
+            return Ok(cached);
+
         // =============================
         // 2️ BASE QUERY (PRIMARY ONLY)
         // =============================
@@ -4657,7 +4874,11 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
             .ToListAsync();
 
         if (!logs.Any())
-            return Ok(new { Message = "No data found" });
+        {
+            var empty = new { Message = "No data found" };
+            await SetMapViewCacheAsync(cacheKey, empty);
+            return Ok(empty);
+        }
 
         // =============================
         // 4️ HELPERS
@@ -4802,6 +5023,7 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
         // =============================
         // 8️ FINAL RESPONSE
         // =============================
+        await SetMapViewCacheAsync(cacheKey, result);
         return Ok(result);
     }
     catch (Exception ex)
@@ -4817,6 +5039,11 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
         [HttpGet, Route("GetProviders")]
         public JsonResult GetProviders()
         {
+            var cacheKey = BuildMapViewCacheKey("providers");
+            var cached = TryGetMapViewCacheAsync<object>(cacheKey).GetAwaiter().GetResult();
+            if (cached != null)
+                return Json(cached);
+
             var providerNames = db.tbl_network_log
                 .AsNoTracking()
                 .Where(p => !string.IsNullOrEmpty(p.m_alpha_long))
@@ -4828,12 +5055,18 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
                 .Select((name, index) => new { id = index + 1, name })
                 .ToList();
 
+            SetMapViewCacheAsync(cacheKey, providers, 600).GetAwaiter().GetResult();
             return Json(providers);
         }
 
         [HttpGet, Route("GetTechnologies")]
         public JsonResult GetTechnologies()
         {
+            var cacheKey = BuildMapViewCacheKey("technologies");
+            var cached = TryGetMapViewCacheAsync<object>(cacheKey).GetAwaiter().GetResult();
+            if (cached != null)
+                return Json(cached);
+
             var technologyNames = db.tbl_network_log
                 .AsNoTracking()
                 .Where(t => !string.IsNullOrEmpty(t.network))
@@ -4845,6 +5078,7 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
                 .Select((name, index) => new { id = name, name })
                 .ToList();
 
+            SetMapViewCacheAsync(cacheKey, technologies, 600).GetAwaiter().GetResult();
             return Json(technologies);
         }
 
@@ -4853,6 +5087,11 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
         {
             try
             {
+                var cacheKey = BuildMapViewCacheKey("bands");
+                var cached = TryGetMapViewCacheAsync<object>(cacheKey).GetAwaiter().GetResult();
+                if (cached != null)
+                    return Json(cached);
+
                 var bandNames = db.tbl_network_log
                     .AsNoTracking()
                     .Where(b => !string.IsNullOrEmpty(b.band))
@@ -4864,6 +5103,7 @@ public async Task<IActionResult> GetIndoorOutdoorSessionAnalytics(
                     .Select((name, index) => new { id = index + 1, name })
                     .ToList();
 
+                SetMapViewCacheAsync(cacheKey, bands, 600).GetAwaiter().GetResult();
                 return Json(bands);
             }
             catch (Exception ex)
@@ -5206,6 +5446,11 @@ public JsonResult GetPredictionLog(
         {
             try
             {
+                var cacheKey = BuildMapViewCacheKey("prediction-building-polygons-raw", projectId, metric ?? "RSRP");
+                var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+                if (cached != null)
+                    return Json(cached);
+
                 string sqlQuery = @"
                     SELECT
                         tpd.tbl_project_id,
@@ -5237,6 +5482,7 @@ public JsonResult GetPredictionLog(
                         : (metricKey == "RSRQ" ? a.rsrq : a.sinr)
                 }).ToList();
 
+                await SetMapViewCacheAsync(cacheKey, data);
                 return Json(data);
             }
             catch (Exception ex)
@@ -5448,6 +5694,7 @@ public JsonResult GetPredictionLog(
 
                 await db.tbl_network_log.AddRangeAsync(logsToInsert);
                 await db.SaveChangesAsync();
+                await InvalidateMapViewCachesAsync();
 
                 message.Status = 1;
                 message.Message = "Data saved successfully.";
@@ -5865,6 +6112,23 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 return BadRequest(new { Status = 0, Message = "version must be 'original' or 'combined'" });
             }
 
+            var cacheKey = BuildMapViewCacheKey(
+                "site-prediction",
+                projectId,
+                site,
+                cell_id,
+                cluster,
+                technology,
+                band,
+                pci,
+                limit,
+                offset,
+                requestedVersion);
+
+            var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+            if (cached != null)
+                return Json(cached);
+
             var conn = db.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
                 await conn.OpenAsync();
@@ -6050,13 +6314,16 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 list.Add(row);
             }
 
-            return Json(new
+            var response = new
             {
                 Status = 1,
                 Version = requestedVersion,
                 Count = list.Count,
                 Data = list
-            });
+            };
+
+            await SetMapViewCacheAsync(cacheKey, response);
+            return Json(response);
         }
 
         [HttpGet, Route("CompareSitePrediction")]
@@ -6073,6 +6340,22 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
         {
             if (projectId <= 0)
                 return BadRequest(new { Status = 0, Message = "projectId is required" });
+
+            var cacheKey = BuildMapViewCacheKey(
+                "site-prediction-compare",
+                projectId,
+                site,
+                cell_id,
+                cluster,
+                technology,
+                band,
+                pci,
+                limit,
+                offset);
+
+            var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+            if (cached != null)
+                return Json(cached);
 
             var conn = db.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
@@ -6223,12 +6506,15 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 });
             }
 
-            return Json(new
+            var response = new
             {
                 Status = 1,
                 baseline = baselineList,
                 optimized = optimizedList
-            });
+            };
+
+            await SetMapViewCacheAsync(cacheKey, response);
+            return Json(response);
         }
 
         [HttpPost, Route("UpdateSitePrediction")]
@@ -6603,6 +6889,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 }
 
                 await tx.CommitAsync();
+                await InvalidateMapViewCachesAsync();
 
                 return Ok(new
                 {
@@ -6878,6 +7165,7 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
         // 4. Save to Database
         db.tbl_project.Add(newProject);
         await db.SaveChangesAsync();
+        await InvalidateMapViewCachesAsync();
 
         response.Status = 1;
         response.Message = "Project created successfully with associated sessions.";
@@ -6924,6 +7212,19 @@ public async Task<IActionResult> GetSiteNoMl(
     if (projectId <= 0)
         return BadRequest(new { Status = 0, Message = "projectId is required" });
 
+    var cacheKey = BuildMapViewCacheKey(
+        "site-no-ml",
+        projectId,
+        network ?? "all",
+        site_key_inferred,
+        pci_or_psi,
+        earfcn_or_narfcn,
+        limit,
+        offset);
+    var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+    if (cached != null)
+        return Json(cached);
+
 	    var sql = @"
 	    SELECT
 	        s.*
@@ -6965,12 +7266,14 @@ public async Task<IActionResult> GetSiteNoMl(
         list.Add(row);
     }
 
-    return Json(new
+    var response = new
     {
         Status = 1,
         Count = list.Count,
         Data = list
-    });
+    };
+    await SetMapViewCacheAsync(cacheKey, response);
+    return Json(response);
 }
 [HttpGet, Route("GetSiteMl")]
 public async Task<IActionResult> GetSiteMl(
@@ -6984,6 +7287,19 @@ public async Task<IActionResult> GetSiteMl(
 {
     if (projectId <= 0)
         return BadRequest(new { Status = 0, Message = "projectId is required" });
+
+    var cacheKey = BuildMapViewCacheKey(
+        "site-ml",
+        projectId,
+        network ?? "all",
+        site_key_inferred,
+        pci_or_psi,
+        earfcn_or_narfcn,
+        limit,
+        offset);
+    var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+    if (cached != null)
+        return Json(cached);
 
     var sql = @"
     SELECT
@@ -7048,12 +7364,14 @@ public async Task<IActionResult> GetSiteMl(
         list.Add(row);
     }
 
-    return Json(new
+    var response = new
     {
         Status = 1,
         Count = list.Count,
         Data = list
-    });
+    };
+    await SetMapViewCacheAsync(cacheKey, response);
+    return Json(response);
 }
 
 [HttpPost, Route("AddSitePrediction")]
@@ -7185,6 +7503,11 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
             if (projectId <= 0)
                 return BadRequest(new { Status = 0, Message = "projectId is required" });
 
+            var cacheKey = BuildMapViewCacheKey("saved-polygons", projectId, limit, offset);
+            var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+            if (cached != null)
+                return Json(cached);
+
             var rows = new List<object>();
             var conn = db.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
@@ -7220,11 +7543,13 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
                 });
             }
 
-            return Json(new
+            var response = new
             {
                 Status = 1,
                 Data = rows
-            });
+            };
+            await SetMapViewCacheAsync(cacheKey, response);
+            return Json(response);
         }
 
         [HttpPost, Route("AssignExistingSitePredictionToProject")]
@@ -7280,6 +7605,11 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
 
             try
             {
+                var cacheKey = BuildMapViewCacheKey("project-polygons-v2", projectId, src);
+                var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+                if (cached != null)
+                    return Ok(cached);
+
                 var conn = db.Database.GetDbConnection();
                 if (conn.State != System.Data.ConnectionState.Open)
                     await conn.OpenAsync();
@@ -7369,7 +7699,7 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
 
                 List<object> finalList = (src == "save") ? savedPolyList : mapRegionList;
 
-                return Ok(new
+                var response = new
                 {
                     Status = 1,
                     ProjectId = projectId,
@@ -7377,7 +7707,9 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
                     CountFromSavePolygon = savedPolyList.Count,
                     CountFromMapRegions = mapRegionList.Count,
                     Data = finalList
-                });
+                };
+                await SetMapViewCacheAsync(cacheKey, response);
+                return Ok(response);
             }
             catch (Exception ex)
             {
@@ -7401,6 +7733,11 @@ public async Task<IActionResult> GetNeighboursForPrimary(
 
     try
     {
+        var cacheKey = BuildMapViewCacheKey("neighbours-for-primary", sessionId, dls ?? "all", uls ?? "all");
+        var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+        if (cached != null)
+            return Ok(cached);
+
         var conn = db.Database.GetDbConnection();
         if (conn.State != ConnectionState.Open)
             await conn.OpenAsync();
@@ -7431,7 +7768,11 @@ public async Task<IActionResult> GetNeighboursForPrimary(
         }
 
         if (rows.Count == 0)
-            return Ok(new { Status = 1, sessionId, primaries = Array.Empty<object>() });
+        {
+            var empty = new { Status = 1, sessionId, primaries = Array.Empty<object>() };
+            await SetMapViewCacheAsync(cacheKey, empty);
+            return Ok(empty);
+        }
 
         // --------------------------------------------------------------------
         // Helper functions
@@ -7565,13 +7906,15 @@ public async Task<IActionResult> GetNeighboursForPrimary(
             .Where(x => x != null)
             .ToList();
 
-        return Ok(new
+        var response = new
         {
             Status = 1,
             sessionId,
             pci_collision_primary = primaryPciCollision,
             primaries
-        });
+        };
+        await SetMapViewCacheAsync(cacheKey, response);
+        return Ok(response);
     }
     catch (Exception ex)
     {
@@ -7586,7 +7929,7 @@ public async Task<IActionResult> GetNeighboursForPrimary(
 
 
 [HttpGet, Route("GetProjects")]
-public IActionResult GetProjects([FromQuery] int? company_id = null)
+public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
 {
     var message = new ReturnAPIResponse();
 
@@ -7606,6 +7949,11 @@ public IActionResult GetProjects([FromQuery] int? company_id = null)
                 Message = "Unauthorized. Invalid Company."
             });
         }
+
+        var cacheKey = BuildMapViewCacheKey("projects", targetCompanyId);
+        var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+        if (cached != null)
+            return Json(cached);
 
         // 2. Query with company filter
         var projects = db.tbl_project
@@ -7631,6 +7979,7 @@ public IActionResult GetProjects([FromQuery] int? company_id = null)
 
         message.Status = 1;
         message.Data = projects;
+        await SetMapViewCacheAsync(cacheKey, message);
     }
     catch (Exception ex)
     {
@@ -7651,6 +8000,11 @@ public async Task<JsonResult> GetDominanceDetails([FromQuery] MapFilter1 filters
 
     try
     {
+        var cacheKey = BuildMapViewCacheKey("dominance-details", sessionIds, filters?.NetworkType ?? "all");
+        var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+        if (cached != null)
+            return Json(cached);
+
         string connString = db.Database.GetConnectionString();
         using var conn = new MySqlConnection(connString);
         await conn.OpenAsync();
@@ -7744,12 +8098,14 @@ public async Task<JsonResult> GetDominanceDetails([FromQuery] MapFilter1 filters
             domList.Add(domVal);
         }
 
-        return Json(new 
+        var response = new 
         { 
             success = true, 
             count = groupedData.Count, 
             data = groupedData.Values 
-        });
+        };
+        await SetMapViewCacheAsync(cacheKey, response);
+        return Json(response);
     }
     catch (Exception ex)
     {
@@ -7766,6 +8122,11 @@ public async Task<JsonResult> GetPciDistribution([FromQuery] MapFilter1 filters)
 
     try
     {
+        var cacheKey = BuildMapViewCacheKey("pci-distribution", sessionIds);
+        var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+        if (cached != null)
+            return Json(cached);
+
         string connString = db.Database.GetConnectionString();
 
         // Task 1: Primary YES (Normalized by Total Primary Count)
@@ -7786,12 +8147,14 @@ public async Task<JsonResult> GetPciDistribution([FromQuery] MapFilter1 filters)
 
         await Task.WhenAll(taskPrimary, taskNeighbor);
 
-        return Json(new
+        var response = new
         {
             success = true,
             primary_yes = taskPrimary.Result,
             primary_no = taskNeighbor.Result
-        });
+        };
+        await SetMapViewCacheAsync(cacheKey, response);
+        return Json(response);
     }
     catch (Exception ex)
     {
@@ -7906,6 +8269,11 @@ public async Task<IActionResult> GetLtePredictionStats([FromQuery] long projectI
 
     try
     {
+        var cacheKey = BuildMapViewCacheKey("lte-prediction-stats", projectId, metric);
+        var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+        if (cached != null)
+            return Ok(cached);
+
         List<double> valuesList;
 
         // FIX: Using db.Set<T>() explicitly resolves the CS0411 and CS1061 compiler errors
@@ -7940,15 +8308,21 @@ public async Task<IActionResult> GetLtePredictionStats([FromQuery] long projectI
         }
 
         if (valuesList.Count == 0)
-            return Ok(new { Status = 0, Message = $"No {metric} prediction data found for this project." });
+        {
+            var empty = new { Status = 0, Message = $"No {metric} prediction data found for this project." };
+            await SetMapViewCacheAsync(cacheKey, empty);
+            return Ok(empty);
+        }
 
-        return Ok(new
+        var response = new
         {
             Status = 1,
             ProjectId = projectId,
             Metric = metric,
             Data = CalculateMetrics(valuesList)
-        });
+        };
+        await SetMapViewCacheAsync(cacheKey, response);
+        return Ok(response);
     }
     catch (Exception ex)
     {
@@ -8013,6 +8387,11 @@ public async Task<IActionResult> GetLtePredictionLocationStats(
 
     try
     {
+        var cacheKey = BuildMapViewCacheKey("lte-prediction-location-stats", projectId, metric, statType, siteId ?? "all");
+        var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+        if (cached != null)
+            return Ok(cached);
+
         var baseQuery = db.Set<tbl_lte_prediction_results>()
                           .AsNoTracking()
                           .Where(x => x.ProjectId == projectId);
@@ -8053,7 +8432,9 @@ public async Task<IActionResult> GetLtePredictionLocationStats(
         {
             string msg = $"No {metric} prediction data found for this project";
             msg += string.IsNullOrWhiteSpace(siteId) ? "." : $" and site ID '{siteId}'.";
-            return Ok(new { Status = 0, Message = msg });
+            var empty = new { Status = 0, Message = msg };
+            await SetMapViewCacheAsync(cacheKey, empty);
+            return Ok(empty);
         }
 
         // 4. GROUP BY LAT, LON, AND SITE ID
@@ -8075,7 +8456,7 @@ public async Task<IActionResult> GetLtePredictionLocationStats(
             })
             .ToList();
 
-        return Ok(new
+        var response = new
         {
             Status = 1,
             ProjectId = projectId,
@@ -8084,7 +8465,9 @@ public async Task<IActionResult> GetLtePredictionLocationStats(
             StatRequested = statType,
             TotalLocations = groupedData.Count,
             Data = groupedData
-        });
+        };
+        await SetMapViewCacheAsync(cacheKey, response);
+        return Ok(response);
     }
     catch (Exception ex)
     {
@@ -8110,6 +8493,11 @@ public async Task<IActionResult> GetLtePredictionLocationStatsRefined(
 
     try
     {
+        var cacheKey = BuildMapViewCacheKey("lte-prediction-location-stats-refined", projectId, metric, statType, siteId ?? "all");
+        var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+        if (cached != null)
+            return Ok(cached);
+
         var baseQuery = db.Set<tbl_lte_prediction_results_refined>()
                           .AsNoTracking()
                           .Where(x => x.project_id == projectId);
@@ -8148,7 +8536,9 @@ public async Task<IActionResult> GetLtePredictionLocationStatsRefined(
         {
             string msg = $"No {metric} prediction data found for this project";
             msg += string.IsNullOrWhiteSpace(siteId) ? "." : $" and site ID '{siteId}'.";
-            return Ok(new { Status = 0, Message = msg });
+            var empty = new { Status = 0, Message = msg };
+            await SetMapViewCacheAsync(cacheKey, empty);
+            return Ok(empty);
         }
 
         var groupedData = rawData
@@ -8169,7 +8559,7 @@ public async Task<IActionResult> GetLtePredictionLocationStatsRefined(
             })
             .ToList();
 
-        return Ok(new
+        var response = new
         {
             Status = 1,
             ProjectId = projectId,
@@ -8178,7 +8568,9 @@ public async Task<IActionResult> GetLtePredictionLocationStatsRefined(
             StatRequested = statType,
             TotalLocations = groupedData.Count,
             Data = groupedData
-        });
+        };
+        await SetMapViewCacheAsync(cacheKey, response);
+        return Ok(response);
     }
     catch (Exception ex)
     {
@@ -8221,6 +8613,17 @@ public async Task<IActionResult> GetSitePredictionBase(
 
     try
     {
+        var cacheKey = BuildMapViewCacheKey(
+            "site-prediction-base",
+            projectId,
+            trimmedNodeBId ?? "all",
+            trimmedCellId ?? "all",
+            trimmedSector ?? "all",
+            trimmedSectorId ?? "all");
+        var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+        if (cached != null)
+            return Ok(cached);
+
         const string tableName = "lte_prediction_baseline_results";
         var conn = db.Database.GetDbConnection();
         if (conn.State != System.Data.ConnectionState.Open)
@@ -8296,7 +8699,11 @@ public async Task<IActionResult> GetSitePredictionBase(
         }
 
         if (lookupClauses.Count == 0)
-            return Ok(new { Status = 1, Table = tableName, Count = 0, Data = Array.Empty<object>() });
+        {
+            var empty = new { Status = 1, Table = tableName, Count = 0, Data = Array.Empty<object>() };
+            await SetMapViewCacheAsync(cacheKey, empty);
+            return Ok(empty);
+        }
 
         var whereParts = new List<string>();
         if (andClauses.Count > 0) whereParts.AddRange(andClauses);
@@ -8344,7 +8751,7 @@ ORDER BY b.id DESC;";
             items.Add(row);
         }
 
-        return Ok(new
+        var response = new
         {
             Status = 1,
             Table = tableName,
@@ -8356,7 +8763,9 @@ ORDER BY b.id DESC;";
             Total = items.Count,
             Count = items.Count,
             Data = items
-        });
+        };
+        await SetMapViewCacheAsync(cacheKey, response);
+        return Ok(response);
     }
     catch (Exception ex)
     {
@@ -8396,6 +8805,17 @@ public async Task<IActionResult> GetSitePredictionOptimised(
             Message = "At least one lookup key is required (node_b_id, cell_id, sector, or sector_id)."
         });
     }
+
+    var cacheKey = BuildMapViewCacheKey(
+        "site-prediction-optimised",
+        projectId,
+        trimmedNodeBId ?? "all",
+        trimmedCellId ?? "all",
+        trimmedSector ?? "all",
+        trimmedSectorId ?? "all");
+    var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
+    if (cached != null)
+        return Ok(cached);
 
     try
     {
@@ -8577,7 +8997,7 @@ WHERE NOT EXISTS (SELECT 1 FROM optimized_rows);";
             rows.Add(row);
         }
 
-        return Ok(new
+        var response = new
         {
             Status = 1,
             ProjectIdFiltered = projectId,
@@ -8587,7 +9007,9 @@ WHERE NOT EXISTS (SELECT 1 FROM optimized_rows);";
             SectorFiltered = lookupSector,
             Count = rows.Count,
             Data = rows
-        });
+        };
+        await SetMapViewCacheAsync(cacheKey, response);
+        return Ok(response);
     }
     catch (Exception ex)
     {
