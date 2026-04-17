@@ -146,6 +146,25 @@ namespace SignalTracker.Controllers
             }
         }
 
+        private static List<T> SliceCachedPage<T>(IReadOnlyList<T> rows, int limit, int offset)
+        {
+            if (rows.Count == 0)
+                return new List<T>();
+
+            var safeOffset = Math.Max(offset, 0);
+            if (safeOffset >= rows.Count)
+                return new List<T>();
+
+            var safeLimit = Math.Max(limit, 1);
+            return rows.Skip(safeOffset).Take(safeLimit).ToList();
+        }
+
+        private sealed class CompareSitePredictionCacheRow
+        {
+            public Dictionary<string, object?> baseline { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+            public Dictionary<string, object?> optimized { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        }
+
         // =========================================================================
         // Technology / Band classifier (4G/5G/NSA/LTE-FDD/TDD detection)
         // =========================================================================
@@ -6032,13 +6051,20 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 technology,
                 band,
                 pci,
-                limit,
-                offset,
                 requestedVersion);
 
-            var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
-            if (cached != null)
-                return Json(cached);
+            var cachedRows = await TryGetMapViewCacheAsync<List<Dictionary<string, object?>>>(cacheKey);
+            if (cachedRows != null)
+            {
+                var cachedPageRows = SliceCachedPage(cachedRows, Math.Clamp(limit, 1, 2000), Math.Max(offset, 0));
+                return Json(new
+                {
+                    Status = 1,
+                    Version = requestedVersion,
+                    Count = cachedPageRows.Count,
+                    Data = cachedPageRows
+                });
+            }
 
             var conn = db.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
@@ -6205,15 +6231,12 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 FROM site_prediction sp
                 WHERE sp.tbl_project_id = @pid
                 {filterClause}
-                ORDER BY sp.id DESC
-                LIMIT @l OFFSET @o;";
+                ORDER BY sp.id DESC;";
 
             Add(cmd, "@pid", projectId);
             AddSitePredictionFilterParameters(cmd, site, cell_id, cluster, technology, band, pci);
-            Add(cmd, "@l", Math.Clamp(limit, 1, 2000));
-            Add(cmd, "@o", Math.Max(offset, 0));
 
-            var list = new List<object>();
+            var list = new List<Dictionary<string, object?>>();
             await using var r = await cmd.ExecuteReaderAsync();
             while (await r.ReadAsync())
             {
@@ -6225,15 +6248,16 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 list.Add(row);
             }
 
+            var pagedRows = SliceCachedPage(list, Math.Clamp(limit, 1, 2000), Math.Max(offset, 0));
             var response = new
             {
                 Status = 1,
                 Version = requestedVersion,
-                Count = list.Count,
-                Data = list
+                Count = pagedRows.Count,
+                Data = pagedRows
             };
 
-            await SetMapViewCacheAsync(cacheKey, response);
+            await SetMapViewCacheAsync(cacheKey, list);
             return Json(response);
         }
 
@@ -6260,13 +6284,19 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 cluster,
                 technology,
                 band,
-                pci,
-                limit,
-                offset);
+                pci);
 
-            var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
-            if (cached != null)
-                return Json(cached);
+            var cachedRows = await TryGetMapViewCacheAsync<List<CompareSitePredictionCacheRow>>(cacheKey);
+            if (cachedRows != null)
+            {
+                var cachedPageRows = SliceCachedPage(cachedRows, Math.Clamp(limit, 1, 2000), Math.Max(offset, 0));
+                return Json(new
+                {
+                    Status = 1,
+                    baseline = cachedPageRows.Select(x => new { baseline = x.baseline }).ToList(),
+                    optimized = cachedPageRows.Select(x => new { optimized = x.optimized }).ToList()
+                });
+            }
 
             var conn = db.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
@@ -6372,16 +6402,12 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     )
                 WHERE sp.tbl_project_id = @pid
                 {filterClause}
-                ORDER BY sp.id DESC
-                LIMIT @l OFFSET @o;";
+                ORDER BY sp.id DESC;";
 
             Add(cmd, "@pid", projectId);
             AddSitePredictionFilterParameters(cmd, site, cell_id, cluster, technology, band, pci);
-            Add(cmd, "@l", Math.Clamp(limit, 1, 2000));
-            Add(cmd, "@o", Math.Max(offset, 0));
 
-            var baselineList = new List<object>();
-            var optimizedList = new List<object>();
+            var allRows = new List<CompareSitePredictionCacheRow>();
 
             await using var r = await cmd.ExecuteReaderAsync();
             var baselineOrdinals = commonColumns.ToDictionary(
@@ -6406,25 +6432,22 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     optimizedRow[col] = await r.IsDBNullAsync(optimizedOrdinal) ? null : r.GetValue(optimizedOrdinal);
                 }
 
-                baselineList.Add(new
+                allRows.Add(new CompareSitePredictionCacheRow
                 {
-                    baseline = baselineRow
-                });
-
-                optimizedList.Add(new
-                {
+                    baseline = baselineRow,
                     optimized = optimizedRow
                 });
             }
 
+            var pagedRows = SliceCachedPage(allRows, Math.Clamp(limit, 1, 2000), Math.Max(offset, 0));
             var response = new
             {
                 Status = 1,
-                baseline = baselineList,
-                optimized = optimizedList
+                baseline = pagedRows.Select(x => new { baseline = x.baseline }).ToList(),
+                optimized = pagedRows.Select(x => new { optimized = x.optimized }).ToList()
             };
 
-            await SetMapViewCacheAsync(cacheKey, response);
+            await SetMapViewCacheAsync(cacheKey, allRows);
             return Json(response);
         }
 
@@ -7129,12 +7152,18 @@ public async Task<IActionResult> GetSiteNoMl(
         network ?? "all",
         site_key_inferred,
         pci_or_psi,
-        earfcn_or_narfcn,
-        limit,
-        offset);
-    var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
-    if (cached != null)
-        return Json(cached);
+        earfcn_or_narfcn);
+    var cachedRows = await TryGetMapViewCacheAsync<List<Dictionary<string, object?>>>(cacheKey);
+    if (cachedRows != null)
+    {
+        var cachedPageRows = SliceCachedPage(cachedRows, Math.Clamp(limit, 1, 20000), Math.Max(offset, 0));
+        return Json(new
+        {
+            Status = 1,
+            Count = cachedPageRows.Count,
+            Data = cachedPageRows
+        });
+    }
 
 	    var sql = @"
 	    SELECT
@@ -7142,8 +7171,7 @@ public async Task<IActionResult> GetSiteNoMl(
 	    FROM site_noMl s
 	    WHERE s.project_id = @pid
 	    /**n**/ /**s**/ /**p**/ /**e**/
-	    ORDER BY s.id DESC
-	    LIMIT @l OFFSET @o;
+	    ORDER BY s.id DESC;
 	";
 
 
@@ -7164,8 +7192,6 @@ public async Task<IActionResult> GetSiteNoMl(
     if (site_key_inferred.HasValue) Add(cmd, "@s", site_key_inferred.Value);
     if (pci_or_psi.HasValue) Add(cmd, "@p", pci_or_psi.Value);
     if (earfcn_or_narfcn.HasValue) Add(cmd, "@e", earfcn_or_narfcn.Value);
-    Add(cmd, "@l", Math.Clamp(limit, 1, 20000));
-    Add(cmd, "@o", Math.Max(offset, 0));
 
     var list = new List<Dictionary<string, object?>>();
     await using var r = await cmd.ExecuteReaderAsync();
@@ -7177,13 +7203,14 @@ public async Task<IActionResult> GetSiteNoMl(
         list.Add(row);
     }
 
+    var pagedRows = SliceCachedPage(list, Math.Clamp(limit, 1, 20000), Math.Max(offset, 0));
     var response = new
     {
         Status = 1,
-        Count = list.Count,
-        Data = list
+        Count = pagedRows.Count,
+        Data = pagedRows
     };
-    await SetMapViewCacheAsync(cacheKey, response);
+    await SetMapViewCacheAsync(cacheKey, list);
     return Json(response);
 }
 [HttpGet, Route("GetSiteMl")]
@@ -7205,12 +7232,18 @@ public async Task<IActionResult> GetSiteMl(
         network ?? "all",
         site_key_inferred,
         pci_or_psi,
-        earfcn_or_narfcn,
-        limit,
-        offset);
-    var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
-    if (cached != null)
-        return Json(cached);
+        earfcn_or_narfcn);
+    var cachedRows = await TryGetMapViewCacheAsync<List<Dictionary<string, object?>>>(cacheKey);
+    if (cachedRows != null)
+    {
+        var cachedPageRows = SliceCachedPage(cachedRows, Math.Clamp(limit, 1, 20000), Math.Max(offset, 0));
+        return Json(new
+        {
+            Status = 1,
+            Count = cachedPageRows.Count,
+            Data = cachedPageRows
+        });
+    }
 
     var sql = @"
     SELECT
@@ -7240,8 +7273,7 @@ public async Task<IActionResult> GetSiteMl(
          )
     WHERE 1=1
       /**n**/ /**s**/ /**p**/ /**e**/
-    ORDER BY s.id DESC
-    LIMIT @l OFFSET @o;
+    ORDER BY s.id DESC;
 ";
 
     // ... (rest of the function remains the same)
@@ -7262,8 +7294,6 @@ public async Task<IActionResult> GetSiteMl(
     if (site_key_inferred.HasValue) Add(cmd, "@s", site_key_inferred.Value);
     if (pci_or_psi.HasValue) Add(cmd, "@p", pci_or_psi.Value);
     if (earfcn_or_narfcn.HasValue) Add(cmd, "@e", earfcn_or_narfcn.Value);
-    Add(cmd, "@l", Math.Clamp(limit, 1, 20000));
-    Add(cmd, "@o", Math.Max(offset, 0));
 
     var list = new List<Dictionary<string, object?>>();
     await using var r = await cmd.ExecuteReaderAsync();
@@ -7275,13 +7305,14 @@ public async Task<IActionResult> GetSiteMl(
         list.Add(row);
     }
 
+    var pagedRows = SliceCachedPage(list, Math.Clamp(limit, 1, 20000), Math.Max(offset, 0));
     var response = new
     {
         Status = 1,
-        Count = list.Count,
-        Data = list
+        Count = pagedRows.Count,
+        Data = pagedRows
     };
-    await SetMapViewCacheAsync(cacheKey, response);
+    await SetMapViewCacheAsync(cacheKey, list);
     return Json(response);
 }
 
@@ -7414,12 +7445,19 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
             if (projectId <= 0)
                 return BadRequest(new { Status = 0, Message = "projectId is required" });
 
-            var cacheKey = BuildMapViewCacheKey("saved-polygons", projectId, limit, offset);
-            var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
-            if (cached != null)
-                return Json(cached);
+            var cacheKey = BuildMapViewCacheKey("saved-polygons", projectId);
+            var cachedRows = await TryGetMapViewCacheAsync<List<Dictionary<string, object?>>>(cacheKey);
+            if (cachedRows != null)
+            {
+                var cachedPageRows = SliceCachedPage(cachedRows, Math.Clamp(limit, 1, 50000), Math.Max(offset, 0));
+                return Json(new
+                {
+                    Status = 1,
+                    Data = cachedPageRows
+                });
+            }
 
-            var rows = new List<object>();
+            var rows = new List<Dictionary<string, object?>>();
             var conn = db.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
                 await conn.OpenAsync();
@@ -7434,32 +7472,30 @@ public async Task<IActionResult> AddSitePrediction([FromBody] AddSitePredictionM
                     area
                 FROM tbl_savepolygon
                 WHERE project_id = @pid
-                ORDER BY id DESC
-                LIMIT @l OFFSET @o;";
+                ORDER BY id DESC;";
 
             Add(cmd, "@pid", projectId);
-            Add(cmd, "@l", Math.Clamp(limit, 1, 50000));
-            Add(cmd, "@o", Math.Max(offset, 0));
 
             await using var r = await cmd.ExecuteReaderAsync();
             while (await r.ReadAsync())
             {
-                rows.Add(new
+                rows.Add(new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
                 {
-                    id = r.GetFieldValue<long>(0),
-                    name = r.IsDBNull(1) ? null : r.GetString(1),
-                    wkt = r.IsDBNull(2) ? null : r.GetString(2),
-                    project_id = r.IsDBNull(3) ? (long?)null : r.GetFieldValue<long>(3),
-                    area = r.IsDBNull(4) ? (double?)null : Convert.ToDouble(r.GetDecimal(4))
+                    ["id"] = r.GetFieldValue<long>(0),
+                    ["name"] = r.IsDBNull(1) ? null : r.GetString(1),
+                    ["wkt"] = r.IsDBNull(2) ? null : r.GetString(2),
+                    ["project_id"] = r.IsDBNull(3) ? (long?)null : r.GetFieldValue<long>(3),
+                    ["area"] = r.IsDBNull(4) ? (double?)null : Convert.ToDouble(r.GetDecimal(4))
                 });
             }
 
+            var pagedRows = SliceCachedPage(rows, Math.Clamp(limit, 1, 50000), Math.Max(offset, 0));
             var response = new
             {
                 Status = 1,
-                Data = rows
+                Data = pagedRows
             };
-            await SetMapViewCacheAsync(cacheKey, response);
+            await SetMapViewCacheAsync(cacheKey, rows);
             return Json(response);
         }
 
