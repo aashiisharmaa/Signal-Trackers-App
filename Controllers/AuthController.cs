@@ -149,7 +149,8 @@ namespace SignalTracker.Controllers
                     new Claim("m_user_type_id", user.m_user_type_id.ToString()),
                     new Claim("UserId", user.id.ToString()),
                     new Claim("UserTypeId", user.m_user_type_id.ToString()),
-                    new Claim("CompanyId", user.company_id?.ToString() ?? "0")
+                    new Claim("CompanyId", user.company_id?.ToString() ?? "0"),
+                    new Claim("company_id", user.company_id?.ToString() ?? "0")
                 };
 
                 var claimsIdentity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
@@ -167,6 +168,7 @@ namespace SignalTracker.Controllers
                 HttpContext.Session.SetString("UserName", user.email ?? string.Empty);
                 HttpContext.Session.SetInt32("UserID", user.id);
                 HttpContext.Session.SetInt32("UserType", user.m_user_type_id);
+                HttpContext.Session.SetInt32("CompanyId", user.company_id ?? 0);
                 loginCompleted = true;
 
                 return Ok(new

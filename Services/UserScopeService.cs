@@ -22,7 +22,8 @@ namespace SignalTracker.Services
         /// </summary>
         public int GetTargetCompanyId(ClaimsPrincipal user, int? requestedCompanyId)
         {
-            var countryCode = user.FindFirst("country_code")?.Value;
+            var countryCode = GetStringClaim(user, "country_code")
+                ?? _httpContextAccessor.HttpContext?.Session?.GetString("country_code");
             bool isTwUser = string.Equals(countryCode, "TW", StringComparison.OrdinalIgnoreCase);
 
             // TW deployment works as a single-tenant environment in current setup:
@@ -34,8 +35,9 @@ namespace SignalTracker.Services
                 return 0;
             }
 
-            var roleClaim = user.FindFirst("UserTypeId")?.Value;
-            int userRole = int.TryParse(roleClaim, out int r) ? r : 0;
+            int userRole = GetIntClaim(user, "UserTypeId", "m_user_type_id")
+                ?? _httpContextAccessor.HttpContext?.Session?.GetInt32("UserType")
+                ?? 0;
 
             // CRITICAL: This block allows Super Admins to see everything
             if (userRole == 3) // 3 = Super Admin
@@ -48,22 +50,58 @@ namespace SignalTracker.Services
             }
 
             // For everyone else, force their own Company ID
-            var companyClaim = user.FindFirst("CompanyId")?.Value;
-            return int.TryParse(companyClaim, out int cid) ? cid : 0;
+            int resolvedCompanyId = GetIntClaim(user, "CompanyId", "company_id")
+                ?? _httpContextAccessor.HttpContext?.Session?.GetInt32("CompanyId")
+                ?? ParseInt(_httpContextAccessor.HttpContext?.Session?.GetString("CompanyId"))
+                ?? 0;
+
+            // Backward compatibility: if claim/session company context is missing,
+            // accept explicit company_id from request to avoid blocking valid users.
+            if (resolvedCompanyId <= 0 && requestedCompanyId.HasValue && requestedCompanyId.Value > 0)
+                return requestedCompanyId.Value;
+
+            return resolvedCompanyId;
         }
         public bool IsSuperAdmin(ClaimsPrincipal user)
         {
-            var countryCode = user.FindFirst("country_code")?.Value;
+            var countryCode = GetStringClaim(user, "country_code")
+                ?? _httpContextAccessor.HttpContext?.Session?.GetString("country_code");
             if (string.Equals(countryCode, "TW", StringComparison.OrdinalIgnoreCase))
                 return true;
 
-            var roleClaim = user.FindFirst("UserTypeId")?.Value;
-            return int.TryParse(roleClaim, out int role) && role == ROLE_SUPER_ADMIN;
+            int role = GetIntClaim(user, "UserTypeId", "m_user_type_id")
+                ?? _httpContextAccessor.HttpContext?.Session?.GetInt32("UserType")
+                ?? 0;
+
+            return role == ROLE_SUPER_ADMIN;
         }
 
         internal int GetCompanyId(ClaimsPrincipal user)
         {
             throw new NotImplementedException();
+        }
+
+        private static string? GetStringClaim(ClaimsPrincipal user, params string[] claimTypes)
+        {
+            foreach (var claimType in claimTypes)
+            {
+                var value = user.FindFirst(claimType)?.Value;
+                if (!string.IsNullOrWhiteSpace(value))
+                    return value;
+            }
+
+            return null;
+        }
+
+        private static int? GetIntClaim(ClaimsPrincipal user, params string[] claimTypes)
+        {
+            var raw = GetStringClaim(user, claimTypes);
+            return ParseInt(raw);
+        }
+
+        private static int? ParseInt(string? value)
+        {
+            return int.TryParse(value, out var parsed) ? parsed : null;
         }
     }
 }

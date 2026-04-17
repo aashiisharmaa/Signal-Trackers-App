@@ -40,44 +40,95 @@ namespace SignalTracker.Models
         {
             if (_db == null) return null;
 
-            var value = await _db.StringGetAsync(key);
-            if (value.IsNullOrEmpty) return null;
+            try
+            {
+                var value = await _db.StringGetAsync(key);
+                if (value.IsNullOrEmpty) return null;
 
-            return JsonSerializer.Deserialize<T>(value!);
+                return JsonSerializer.Deserialize<T>(value!);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Redis GetObjectAsync error [{key}]: {ex.Message}");
+                return null;
+            }
         }
 
         public async Task<bool> SetObjectAsync<T>(string key, T value, int ttlSeconds = 300) where T : class
         {
             if (_db == null) return false;
 
-            var json = JsonSerializer.Serialize(value);
-            return await _db.StringSetAsync(key, json, TimeSpan.FromSeconds(ttlSeconds));
+            try
+            {
+                var json = JsonSerializer.Serialize(value);
+                return await _db.StringSetAsync(key, json, TimeSpan.FromSeconds(ttlSeconds));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Redis SetObjectAsync error [{key}]: {ex.Message}");
+                return false;
+            }
         }
 
         public async Task<string?> GetStringAsync(string key)
         {
             if (_db == null) return null;
 
-            var value = await _db.StringGetAsync(key);
-            return value.IsNullOrEmpty ? null : value.ToString();
+            try
+            {
+                var value = await _db.StringGetAsync(key);
+                return value.IsNullOrEmpty ? null : value.ToString();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Redis GetStringAsync error [{key}]: {ex.Message}");
+                return null;
+            }
         }
 
         public async Task<bool> SetStringAsync(string key, string value, int ttlSeconds = 300)
         {
             if (_db == null) return false;
-            return await _db.StringSetAsync(key, value, TimeSpan.FromSeconds(ttlSeconds));
+
+            try
+            {
+                return await _db.StringSetAsync(key, value, TimeSpan.FromSeconds(ttlSeconds));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Redis SetStringAsync error [{key}]: {ex.Message}");
+                return false;
+            }
         }
 
         public async Task<bool> TrySetStringAsync(string key, string value, int ttlSeconds = 300)
         {
             if (_db == null) return false;
-            return await _db.StringSetAsync(key, value, TimeSpan.FromSeconds(ttlSeconds), when: When.NotExists);
+
+            try
+            {
+                return await _db.StringSetAsync(key, value, TimeSpan.FromSeconds(ttlSeconds), when: When.NotExists);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Redis TrySetStringAsync error [{key}]: {ex.Message}");
+                return false;
+            }
         }
 
         public async Task<bool> DeleteAsync(string key)
         {
             if (_db == null) return false;
-            return await _db.KeyDeleteAsync(key);
+
+            try
+            {
+                return await _db.KeyDeleteAsync(key);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Redis DeleteAsync error [{key}]: {ex.Message}");
+                return false;
+            }
         }
 
         // ---------------- FIX #1: GET KEYS ----------------

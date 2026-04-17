@@ -448,31 +448,11 @@ public async Task<IActionResult> GetProjectPolygons(
     // =========================================================
     // 1. SMART SECURITY: RESOLVE COMPANY ID
     // =========================================================
-    int targetCompanyId = 0;
     bool isSuperAdmin = _userScope.IsSuperAdmin(User);
+    int targetCompanyId = GetTargetCompanyId(company_id);
 
-    if (isSuperAdmin)
-    {
-        // Super Admin: Can view any project, or filter by specific company context
-        targetCompanyId = company_id ?? 0;
-    }
-    else
-    {
-        // Regular Admin: Force Company ID resolution
-        try { targetCompanyId = GetTargetCompanyId(null); } catch { }
-
-        // Fallback to claims
-        if (targetCompanyId == 0)
-        {
-            var claim = User.Claims.FirstOrDefault(c => 
-                c.Type.Equals("company_id", StringComparison.OrdinalIgnoreCase) || 
-                c.Type.Equals("CompanyId", StringComparison.OrdinalIgnoreCase));
-            if (claim != null && int.TryParse(claim.Value, out int cId)) targetCompanyId = cId;
-        }
-
-        if (!isSuperAdmin && targetCompanyId == 0)
-            return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
-    }
+    if (!isSuperAdmin && targetCompanyId == 0)
+        return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
 
     try
     {
@@ -1150,23 +1130,8 @@ public async Task<IActionResult> GetAvailablePolygons(
     // =========================================================
     // 1. SMART SECURITY: RESOLVE COMPANY ID
     // =========================================================
-    int targetCompanyId = 0;
     bool isSuperAdmin = _userScope.IsSuperAdmin(User);
-
-    // Prefer explicit company_id for super admins; otherwise use claim company_id.
-    var claim = User.Claims.FirstOrDefault(c =>
-        c.Type.Equals("company_id", StringComparison.OrdinalIgnoreCase) ||
-        c.Type.Equals("CompanyId", StringComparison.OrdinalIgnoreCase));
-    int claimCompanyId = (claim != null && int.TryParse(claim.Value, out var cId)) ? cId : 0;
-
-    if (isSuperAdmin && company_id.HasValue && company_id.Value > 0)
-    {
-        targetCompanyId = company_id.Value;
-    }
-    else
-    {
-        targetCompanyId = claimCompanyId;
-    }
+    int targetCompanyId = GetTargetCompanyId(company_id);
 
     if (!isSuperAdmin && targetCompanyId == 0)
         return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
@@ -3902,33 +3867,11 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
         // =========================================================
         // 1. STRICT SECURITY: RESOLVE COMPANY ID
         // =========================================================
-        int targetCompanyId = 0;
         bool isSuperAdmin = _userScope.IsSuperAdmin(User);
+        int targetCompanyId = GetTargetCompanyId(company_id);
 
-        if (isSuperAdmin)
-        {
-            // Super Admin: Can view Global (0) or specific Company
-            targetCompanyId = company_id ?? 0;
-        }
-        else
-        {
-            // Regular Admin: Force their own Company ID
-            try { targetCompanyId = GetTargetCompanyId(null); } catch { }
-
-            // Fallback: Claims check
-            if (targetCompanyId == 0)
-            {
-                var claim = User.Claims.FirstOrDefault(c => 
-                    c.Type.Equals("company_id", StringComparison.OrdinalIgnoreCase) || 
-                    c.Type.Equals("CompanyId", StringComparison.OrdinalIgnoreCase));
-                
-                if (claim != null && int.TryParse(claim.Value, out int cId))
-                    targetCompanyId = cId;
-            }
-
-            if (targetCompanyId == 0)
-                return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
-        }
+        if (!isSuperAdmin && targetCompanyId == 0)
+            return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
 
         var cacheKey = BuildMapViewCacheKey(
             "neighbour-logs-date-range",
@@ -4195,43 +4138,11 @@ public async Task<IActionResult> GetLogsByDateRange(
         // =========================================================
         // 1. ROBUST SECURITY: RESOLVE COMPANY ID
         // =========================================================
-        int targetCompanyId = 0;
         bool isSuperAdmin = _userScope.IsSuperAdmin(User);
+        int targetCompanyId = GetTargetCompanyId(company_id);
 
-        if (isSuperAdmin)
-        {
-            // Super Admin: Use provided ID, or 0 for Global View
-            targetCompanyId = company_id ?? 0;
-        }
-        else
-        {
-            // RTheegular Admin: MUST use their own Company ID.
-            
-            // A. Try Helper Method
-            try { targetCompanyId = GetTargetCompanyId(null); } catch { }
-
-            // B. Fallback: Check Token Claims Directly (Case-Insensitive)
-            if (targetCompanyId == 0)
-            {
-                var claim = User.Claims.FirstOrDefault(c => 
-                    c.Type.Equals("company_id", StringComparison.OrdinalIgnoreCase) || 
-                    c.Type.Equals("CompanyId", StringComparison.OrdinalIgnoreCase)
-                );
-
-                if (claim != null && int.TryParse(claim.Value, out int cId))
-                {
-                    targetCompanyId = cId;
-                }
-            }
-
-            // C. CRITICAL FAILURE Check
-            if (targetCompanyId == 0)
-            {
-                // This means the token received has NO Company ID. 
-                // Please ensure your Frontend sends 'Authorization: Bearer <token>' header.
-                return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company ID from Token." });
-            }
-        }
+        if (!isSuperAdmin && targetCompanyId == 0)
+            return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
 
         // =========================================================
         // 2. BUILD DATES & CACHE KEY
@@ -7955,27 +7866,91 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
         if (cached != null)
             return Json(cached);
 
-        // 2. Query with company filter
-        var projects = db.tbl_project
-            .AsNoTracking()
-            .Where(p => targetCompanyId == 0 || p.company_id == targetCompanyId)
-            .Select(a => new
+        // 2. Query with company filter + joined region geometry
+        var projects = new List<object>();
+        string connString = db.Database.GetConnectionString();
+
+        using (var conn = new MySqlConnection(connString))
+        {
+            await conn.OpenAsync();
+            using (var cmd = conn.CreateCommand())
             {
-                a.id,
-                a.project_name,
-                a.ref_session_id,
-                a.from_date,
-                a.to_date,
-                a.provider,
-                a.tech,
-                a.band,
-                a.earfcn,
-                a.apps,
-                a.grid_size,
-                a.created_on,
-                a.Download_path
-            })
-            .ToList();
+                cmd.CommandText = @"
+                    SELECT
+                        p.id,
+                        p.project_name,
+                        p.ref_session_id,
+                        p.from_date,
+                        p.to_date,
+                        p.provider,
+                        p.tech,
+                        p.band,
+                        p.earfcn,
+                        p.apps,
+                        p.grid_size,
+                        p.created_on,
+                        p.Download_path,
+                        ST_AsText(p.polygon) AS project_polygon_wkt,
+                        mr.region_wkt,
+                        mr.region_blob_b64,
+                        COALESCE(ST_AsText(p.polygon), mr.region_wkt) AS geometry_wkt
+                    FROM tbl_project p
+                    LEFT JOIN (
+                        SELECT
+                            mr1.tbl_project_id,
+                            ST_AsText(mr1.region) AS region_wkt,
+                            TO_BASE64(mr1.region) AS region_blob_b64
+                        FROM map_regions mr1
+                        INNER JOIN (
+                            SELECT tbl_project_id, MAX(id) AS max_id
+                            FROM map_regions
+                            WHERE tbl_project_id IS NOT NULL
+                            GROUP BY tbl_project_id
+                        ) picked
+                          ON picked.tbl_project_id = mr1.tbl_project_id
+                         AND picked.max_id = mr1.id
+                    ) mr
+                      ON mr.tbl_project_id = p.id
+                    WHERE (p.status IS NULL OR p.status <> 0)
+                      AND (@cid = 0 OR p.company_id = @cid)
+                    ORDER BY p.id DESC;";
+
+                cmd.Parameters.AddWithValue("@cid", targetCompanyId);
+
+                using (var reader = await cmd.ExecuteReaderAsync())
+                {
+                    while (await reader.ReadAsync())
+                    {
+                        object? ReadDb(string name)
+                        {
+                            var value = reader[name];
+                            return value == DBNull.Value ? null : value;
+                        }
+
+                        projects.Add(new
+                        {
+                            id = ReadDb("id"),
+                            project_name = ReadDb("project_name"),
+                            ref_session_id = ReadDb("ref_session_id"),
+                            from_date = ReadDb("from_date"),
+                            to_date = ReadDb("to_date"),
+                            provider = ReadDb("provider"),
+                            tech = ReadDb("tech"),
+                            band = ReadDb("band"),
+                            earfcn = ReadDb("earfcn"),
+                            apps = ReadDb("apps"),
+                            grid_size = ReadDb("grid_size"),
+                            created_on = ReadDb("created_on"),
+                            Download_path = ReadDb("Download_path"),
+                            project_polygon_wkt = ReadDb("project_polygon_wkt"),
+                            region_wkt = ReadDb("region_wkt"),
+                            region_blob_b64 = ReadDb("region_blob_b64"),
+                            geometry_wkt = ReadDb("geometry_wkt"),
+                        });
+                    }
+                }
+            }
+        }
 
         message.Status = 1;
         message.Data = projects;

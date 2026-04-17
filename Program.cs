@@ -109,9 +109,9 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
             {
                 var redisOptions = ConfigurationOptions.Parse(redisConnString, true);
                 redisOptions.AbortOnConnectFail = false;
-                redisOptions.ConnectTimeout = 5000;
-                redisOptions.SyncTimeout = 5000;
-                redisOptions.AsyncTimeout = 5000;
+                redisOptions.ConnectTimeout = 15000;
+                redisOptions.SyncTimeout = 15000;
+                redisOptions.AsyncTimeout = 15000;
                 redisOptions.ConnectRetry = 5;
                 redisOptions.KeepAlive = 15;
                 redisOptions.ConfigCheckSeconds = 15;
