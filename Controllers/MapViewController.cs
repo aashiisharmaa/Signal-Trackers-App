@@ -6092,7 +6092,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             }
 
             var cacheKey = BuildMapViewCacheKey(
-                "site-prediction",
+                "site-prediction-full",
                 projectId,
                 site,
                 cell_id,
@@ -6238,8 +6238,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     )
                 WHERE sp.tbl_project_id = @pid
                 {filterClause}
-                ORDER BY sp.id DESC
-                LIMIT @l OFFSET @o;"
+                ORDER BY sp.id DESC;"
                 : $@"
                 SELECT
                     sp.id AS original_id,

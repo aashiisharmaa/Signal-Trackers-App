@@ -6,6 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <DefaultItemExcludes>$(DefaultItemExcludes);buildcheck_*\**;**\buildcheck_*\**;build_*\**;**\build_*\**;tmpout_*\**;**\tmpout_*\**;build_obj\**;**\build_obj\**;build_out\**;**\build_out\**;artifacts\**;**\artifacts\**;bin_temp\**;**\bin_temp\**;bin_temp_check\**;**\bin_temp_check\**</DefaultItemExcludes>
+    <DefaultExcludesInProjectFolder>$(DefaultExcludesInProjectFolder);buildcheck_*\**;**\buildcheck_*\**;build_*\**;**\build_*\**;tmpout_*\**;**\tmpout_*\**;build_obj\**;**\build_obj\**;build_out\**;**\build_out\**;artifacts\**;**\artifacts\**;bin_temp\**;**\bin_temp\**;bin_temp_check\**;**\bin_temp_check\**</DefaultExcludesInProjectFolder>
   </PropertyGroup>
 
   <!-- Remove old/unused files -->
