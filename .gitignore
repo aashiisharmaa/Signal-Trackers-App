@@ -16,3 +16,19 @@ UploadedExcels/*
 
 bin/
 obj/
+
+# Generated build outputs used only for local build checks
+buildcheck_*/
+build_*/
+tmpout_*/
+build_obj/
+build_out/
+bin_temp/
+bin_temp_check/
+artifacts/
+
+# Generated build logs
+build_err*.txt
+build_error*.txt
+build_output*.txt
+build_out*.txt
