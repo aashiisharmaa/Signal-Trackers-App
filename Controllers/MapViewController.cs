@@ -1953,6 +1953,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
     {
         var limit = Math.Min(Math.Max(filters.limit, 1), 50000);
         var page = filters.page <= 0 ? 1 : filters.page;
+        var pageOffset = (page - 1) * limit;
         string connString = db.Database.GetConnectionString();
 
         // 1. Prepare Cache Key
@@ -1965,7 +1966,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
             else if (p.StartsWith("v")) providerNormalized = "vodafone";
         }
 
-        string cacheKey = BuildNetworkLogCacheKey(sessionIds, providerNormalized, filters.StartDate, filters.EndDate, page, limit);
+        string cacheKey = BuildNetworkLogCacheKey(sessionIds, providerNormalized, filters.StartDate, filters.EndDate);
 
         // 2. Check Cache
         if (_redis != null && _redis.IsConnected)
@@ -1975,9 +1976,10 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
                 var cached = await _redis.GetObjectAsync<NetworkLogFullResponse>(cacheKey);
                 if (cached != null)
                 {
+                    var cachedPage = SliceCachedPage(cached.data ?? new List<NetworkLogCacheRow>(), limit, pageOffset);
                     Response.Headers["X-Cache"] = "HIT";
                     return Json(new { 
-                        data = cached.data, 
+                        data = cachedPage, 
                         app_summary = cached.app_summary, 
                         io_summary = cached.io_summary, 
                         tpt_volume = cached.tpt_volume,
@@ -1995,8 +1997,8 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         //  BATCHED PARALLEL EXECUTION (3 Tasks instead of 5)
         // =========================================================================
         
-        // Task 1: Main Data (50 rows)
-        var taskData = GetMainDataOnlyEF(sessionIds, providerNormalized, filters, page, limit);
+        // Task 1: Main Data (full filtered set)
+        var taskData = GetMainDataOnlyEF(sessionIds, providerNormalized, filters);
         
         // Task 2: App Summary (Heavy Grouping)
         var taskApps = GetAppSummaryRaw(connString, sessionIds, providerNormalized, filters);
@@ -2010,13 +2012,15 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         // Unpack Combined Stats
         var statsResult = taskStats.Result;
         long calculatedTotalCount = statsResult.Sessions.Sum(x => x.Count);
+        var fullData = taskData.Result;
+        var pageData = SliceCachedPage(fullData, limit, pageOffset);
 
         // =========================================================================
         // 📦 PACKAGE RESPONSE
         // =========================================================================
         var responseObj = new
         {
-            data = taskData.Result,
+            data = pageData,
             app_summary = taskApps.Result,
             io_summary = statsResult.IoSummary,
             tpt_volume = statsResult.Volume,
@@ -2029,7 +2033,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         if (_redis != null && _redis.IsConnected)
         {
              var cacheModel = new NetworkLogFullResponse {
-                 data = taskData.Result,
+                 data = fullData,
                  app_summary = taskApps.Result,
                  io_summary = statsResult.IoSummary,
                  tpt_volume = statsResult.Volume,
@@ -2037,7 +2041,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
                  Sessions = statsResult.Sessions,
                  CachedAt = DateTime.UtcNow
              };
-             _ = _redis.SetObjectAsync(cacheKey, cacheModel, ttlSeconds: 300);
+             await _redis.SetObjectAsync(cacheKey, cacheModel, ttlSeconds: 300);
         }
 
         totalStopwatch.Stop();
@@ -2052,10 +2056,10 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
 }
 
 // ---------------------------------------------------------
-// 1️⃣ MAIN DATA (Fast Page Fetch via EF Core)
+// 1️⃣ MAIN DATA (Full filtered fetch via EF Core)
 // ---------------------------------------------------------
-private async Task<List<object>> GetMainDataOnlyEF(
-    List<long> sessionIds, string provider, MapFilter1 filters, int page, int limit)
+private async Task<List<NetworkLogCacheRow>> GetMainDataOnlyEF(
+    List<long> sessionIds, string provider, MapFilter1 filters)
 {
     IQueryable<tbl_network_log> query = db.tbl_network_log.AsNoTracking()
         .Where(log => sessionIds.Contains((long)log.session_id));
@@ -2084,24 +2088,39 @@ private async Task<List<object>> GetMainDataOnlyEF(
     // Performance: Filter exact match if possible, otherwise Contains
     query = query.Where(log => log.primary_cell_info_1 != null && log.primary_cell_info_1.Contains("mRegistered=YES"));
 
-    var rows = await query.OrderBy(log => log.timestamp)
-        .Skip((page - 1) * limit)
-        .Take(limit)
-        .Select(log => new 
+    return await query.OrderBy(log => log.timestamp)
+        .Select(log => new NetworkLogCacheRow
         {
-            log.id, log.session_id, log.timestamp, log.lat, log.lon, log.battery, log.Speed,log.level,
-            apps = log.apps ?? "", num_cells = log.num_cells, network = log.network ?? "",
-            m_alpha_long = log.m_alpha_long ?? "", pci = log.pci ?? "", rsrp = log.rsrp,
-            rsrq = log.rsrq, sinr = log.sinr, mos = log.mos, jitter = log.jitter,
-            latency = log.latency, tac=log.tac,
+            id = log.id,
+            session_id = log.session_id ?? 0,
+            timestamp = log.timestamp,
+            lat = log.lat,
+            lon = log.lon,
+            battery = log.battery,
+            Speed = log.Speed,
+            level = log.level,
+            apps = log.apps ?? "",
+            num_cells = log.num_cells,
+            network = log.network ?? "",
+            m_alpha_long = log.m_alpha_long ?? "",
+            pci = log.pci ?? "",
+            rsrp = log.rsrp,
+            rsrq = log.rsrq,
+            sinr = log.sinr,
+            mos = log.mos,
+            jitter = log.jitter,
+            latency = log.latency,
+            tac = log.tac,
             packet_loss = log.packet_loss,
-            dl_tpt = log.dl_tpt ?? "0", ul_tpt = log.ul_tpt ?? "0",
-            band = log.band ?? "", image_path = log.image_path ?? "",
-            indoor_outdoor = log.indoor_outdoor ?? "", nodeb_id = log.nodeb_id ?? "", cell_id = log.cell_id ?? ""
+            dl_tpt = log.dl_tpt ?? "0",
+            ul_tpt = log.ul_tpt ?? "0",
+            band = log.band ?? "",
+            image_path = log.image_path ?? "",
+            indoor_outdoor = log.indoor_outdoor ?? "",
+            nodeb_id = log.nodeb_id ?? "",
+            cell_id = log.cell_id ?? ""
         })
         .ToListAsync();
-
-    return rows.Cast<object>().ToList();
 }
 // ---------------------------------------------------------
 //  APP SUMMARY (Updated with Operator Name)
@@ -2346,16 +2365,14 @@ private string BuildNetworkLogCacheKey(
     List<long> sessionIds, 
     string provider, 
     DateTime? from, 
-    DateTime? to, 
-    int page, 
-    int limit)
+    DateTime? to)
 {
     var sortedSessionIds = string.Join("-", sessionIds.OrderBy(x => x));
     string providerKey = provider ?? "all";
     string fromKey = from?.ToString("yyyyMMdd") ?? "null";
     string toKey = to?.ToString("yyyyMMdd") ?? "null";
 
-    return $"networklog:v2:{sortedSessionIds}:{providerKey}:{fromKey}:{toKey}:{page}:{limit}";
+    return $"networklog:v2:{sortedSessionIds}:{providerKey}:{fromKey}:{toKey}";
 }
 
 private void AddParameter(DbCommand cmd, string name, object value)
@@ -2368,14 +2385,14 @@ private void AddParameter(DbCommand cmd, string name, object value)
 
 public class NetworkLogFullResponse
 {
-    public object data { get; set; }
-    public Dictionary<string, object> app_summary { get; set; }
-    public Dictionary<string, object> io_summary { get; set; }
+    public List<NetworkLogCacheRow> data { get; set; } = new();
+    public Dictionary<string, object> app_summary { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, object> io_summary { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public object tpt_volume { get; set; }
     public DateTime CachedAt { get; set; }
-            public object TotalCount { get; internal set; }
-            public object Sessions { get; internal set; }
-        }
+    public int TotalCount { get; set; }
+    public List<SessionCountDto> Sessions { get; set; } = new();
+}
 public class ProviderNetworkTime
 {
     public required string Provider { get; set; }
@@ -2385,6 +2402,38 @@ public class ProviderNetworkTime
 public class SessionIdsRequest
 {
     public List<int> SessionIds { get; set; }
+}
+
+public class NetworkLogCacheRow
+{
+    public int id { get; set; }
+    public int session_id { get; set; }
+    public DateTime? timestamp { get; set; }
+    public float? lat { get; set; }
+    public float? lon { get; set; }
+    public int? battery { get; set; }
+    public float? Speed { get; set; }
+    public int? level { get; set; }
+    public string apps { get; set; } = "";
+    public int? num_cells { get; set; }
+    public string network { get; set; } = "";
+    public string m_alpha_long { get; set; } = "";
+    public string pci { get; set; } = "";
+    public float? rsrp { get; set; }
+    public float? rsrq { get; set; }
+    public float? sinr { get; set; }
+    public float? mos { get; set; }
+    public float? jitter { get; set; }
+    public float? latency { get; set; }
+    public string tac { get; set; } = "";
+    public float? packet_loss { get; set; }
+    public string dl_tpt { get; set; } = "";
+    public string ul_tpt { get; set; } = "";
+    public string band { get; set; } = "";
+    public string image_path { get; set; } = "";
+    public string indoor_outdoor { get; set; } = "";
+    public string nodeb_id { get; set; } = "";
+    public string cell_id { get; set; } = "";
 }
 
 // Delete project and unlink the polygon 
