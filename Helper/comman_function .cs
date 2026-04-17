@@ -244,7 +244,8 @@ public int GetCompanyId()
         { ".doc", "application/msword" },
         { ".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
         { ".ppt", "application/vnd.ms-powerpoint" },
-        { ".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation" }
+        { ".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation" },
+        { ".zip", "application/zip" }
     };
 
         var ext = Path.GetExtension(filePath).ToLower();

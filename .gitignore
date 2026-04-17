@@ -32,3 +32,4 @@ build_err*.txt
 build_error*.txt
 build_output*.txt
 build_out*.txt
+Template-Files/python-runtime-v1-win-x64.zip
