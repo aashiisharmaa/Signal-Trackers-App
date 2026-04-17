@@ -1,12 +1,18 @@
 
 using SignalTracker.Controllers;
 using StackExchange.Redis;
+using System.IO.Compression;
+using System.Text;
 using System.Text.Json;
 
 namespace SignalTracker.Models
 {
     public class RedisService
     {
+        private const byte StoredJsonMarker = 0;
+        private const byte StoredGzipMarker = 1;
+        private const int CompressionThresholdBytes = 8192;
+
         private readonly IConnectionMultiplexer? _multiplexer;
         private readonly IDatabase? _db;
 
@@ -45,7 +51,24 @@ namespace SignalTracker.Models
                 var value = await _db.StringGetAsync(key);
                 if (value.IsNullOrEmpty) return null;
 
-                return JsonSerializer.Deserialize<T>(value!);
+                var payload = (byte[])value!;
+                if (payload.Length == 0)
+                    return null;
+
+                if (payload[0] == StoredGzipMarker)
+                {
+                    var jsonBytes = DecompressPayload(payload.AsSpan(1));
+                    return JsonSerializer.Deserialize<T>(jsonBytes);
+                }
+
+                if (payload[0] == StoredJsonMarker)
+                {
+                    return JsonSerializer.Deserialize<T>(payload.AsSpan(1));
+                }
+
+                // Backward compatibility: older cache entries were stored as plain JSON text.
+                var legacyJson = Encoding.UTF8.GetString(payload);
+                return JsonSerializer.Deserialize<T>(legacyJson);
             }
             catch (Exception ex)
             {
@@ -60,8 +83,9 @@ namespace SignalTracker.Models
 
             try
             {
-                var json = JsonSerializer.Serialize(value);
-                return await _db.StringSetAsync(key, json, TimeSpan.FromSeconds(ttlSeconds));
+                var jsonBytes = JsonSerializer.SerializeToUtf8Bytes(value);
+                var payload = CreateStoredPayload(jsonBytes);
+                return await _db.StringSetAsync(key, payload, TimeSpan.FromSeconds(ttlSeconds));
             }
             catch (Exception ex)
             {
@@ -251,6 +275,36 @@ namespace SignalTracker.Models
         internal async Task<bool> SetObjectAsync(object cacheKey, MapViewController.NetworkLogFullResponse cacheModel, int ttlSeconds)
         {
             throw new NotImplementedException();
+        }
+
+        private static byte[] CreateStoredPayload(ReadOnlySpan<byte> jsonBytes)
+        {
+            if (jsonBytes.Length >= CompressionThresholdBytes)
+            {
+                using var compressed = new MemoryStream();
+                compressed.WriteByte(StoredGzipMarker);
+
+                using (var gzip = new GZipStream(compressed, CompressionLevel.Fastest, leaveOpen: true))
+                {
+                    gzip.Write(jsonBytes);
+                }
+
+                return compressed.ToArray();
+            }
+
+            var payload = new byte[jsonBytes.Length + 1];
+            payload[0] = StoredJsonMarker;
+            jsonBytes.CopyTo(payload.AsSpan(1));
+            return payload;
+        }
+
+        private static byte[] DecompressPayload(ReadOnlySpan<byte> compressedBytes)
+        {
+            using var input = new MemoryStream(compressedBytes.ToArray(), writable: false);
+            using var gzip = new GZipStream(input, CompressionMode.Decompress);
+            using var output = new MemoryStream();
+            gzip.CopyTo(output);
+            return output.ToArray();
         }
     }
 }

@@ -1967,16 +1967,48 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
         }
 
         string cacheKey = BuildNetworkLogCacheKey(sessionIds, providerNormalized, filters.StartDate, filters.EndDate);
+        string pageCacheKey = $"{cacheKey}:page:{page}:limit:{limit}";
 
         // 2. Check Cache
         if (_redis != null && _redis.IsConnected)
         {
             try 
             {
+                var cachedPage = await _redis.GetObjectAsync<NetworkLogFullResponse>(pageCacheKey);
+                if (cachedPage != null)
+                {
+                    Response.Headers["X-Cache"] = "HIT";
+                    return Json(new { 
+                        data = cachedPage.data, 
+                        app_summary = cachedPage.app_summary, 
+                        io_summary = cachedPage.io_summary, 
+                        tpt_volume = cachedPage.tpt_volume,
+                        total_count = cachedPage.TotalCount, 
+                        session_count = sessionIds.Count,
+                        sessions = cachedPage.Sessions, 
+                        cachedAt = cachedPage.CachedAt 
+                    });
+                }
+            }
+            catch {}
+
+            try
+            {
                 var cached = await _redis.GetObjectAsync<NetworkLogFullResponse>(cacheKey);
                 if (cached != null)
                 {
                     var cachedPage = SliceCachedPage(cached.data ?? new List<NetworkLogCacheRow>(), limit, pageOffset);
+                    var cachedPageResponse = new NetworkLogFullResponse
+                    {
+                        data = cachedPage,
+                        app_summary = cached.app_summary,
+                        io_summary = cached.io_summary,
+                        tpt_volume = cached.tpt_volume,
+                        TotalCount = cached.TotalCount,
+                        Sessions = cached.Sessions,
+                        CachedAt = cached.CachedAt
+                    };
+                    await SetMapViewCacheAsync(pageCacheKey, cachedPageResponse);
                     Response.Headers["X-Cache"] = "HIT";
                     return Json(new { 
                         data = cachedPage, 
@@ -2042,6 +2074,16 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter1 filters)
                  CachedAt = DateTime.UtcNow
              };
              await _redis.SetObjectAsync(cacheKey, cacheModel, ttlSeconds: 300);
+             await _redis.SetObjectAsync(pageCacheKey, new NetworkLogFullResponse
+             {
+                 data = pageData,
+                 app_summary = taskApps.Result,
+                 io_summary = statsResult.IoSummary,
+                 tpt_volume = statsResult.Volume,
+                 TotalCount = (int)calculatedTotalCount,
+                 Sessions = statsResult.Sessions,
+                 CachedAt = cacheModel.CachedAt
+             }, ttlSeconds: 300);
         }
 
         totalStopwatch.Stop();
