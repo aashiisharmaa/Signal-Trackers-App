@@ -26,9 +26,6 @@ namespace SignalTracker.Controllers
         private readonly UserScopeService _userScope;
         private readonly LicenseFeatureService _licenseFeatureService;
         private const double METERS_PER_DEGREE_LAT = 111320.0;
-        private const string MedianOperatorSymbol = "=";
-        private const string MaxOperatorSymbol = ">";
-        private const string MinOperatorSymbol = "<";
 
         public GridAnalyticsController(
             ApplicationDbContext context,
@@ -98,7 +95,114 @@ namespace SignalTracker.Controllers
 
                 try
                 {
-                    await EnsureGridAnalyticsTableSchemaAsync(conn);
+                    // ── ENSURE TABLE EXISTS ──
+                    await using (var cmdCreate = conn.CreateCommand())
+                    {
+                        cmdCreate.CommandText = @"
+                        CREATE TABLE IF NOT EXISTS grid_analytics_results (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            project_id INT NOT NULL,
+                            region_id INT,
+                            grid_size_meters DOUBLE NOT NULL,
+                            grid_id VARCHAR(50) NOT NULL,
+                            center_lat DOUBLE NOT NULL,
+                            center_lon DOUBLE NOT NULL,
+                            min_lat DOUBLE NOT NULL,
+                            max_lat DOUBLE NOT NULL,
+                            min_lon DOUBLE NOT NULL,
+                            max_lon DOUBLE NOT NULL,
+                            baseline_point_count INT NOT NULL,
+                            optimized_point_count INT NOT NULL,
+
+                            baseline_avg_rsrp DOUBLE, baseline_avg_rsrq DOUBLE, baseline_avg_sinr DOUBLE,
+                            baseline_median_rsrp DOUBLE, baseline_median_rsrq DOUBLE, baseline_median_sinr DOUBLE,
+                            baseline_min_rsrp DOUBLE, baseline_min_rsrq DOUBLE, baseline_min_sinr DOUBLE,
+                            baseline_max_rsrp DOUBLE, baseline_max_rsrq DOUBLE, baseline_max_sinr DOUBLE,
+                            baseline_mode_rsrp DOUBLE, baseline_mode_rsrq DOUBLE, baseline_mode_sinr DOUBLE,
+
+                            optimized_avg_rsrp DOUBLE, optimized_avg_rsrq DOUBLE, optimized_avg_sinr DOUBLE,
+                            optimized_median_rsrp DOUBLE, optimized_median_rsrq DOUBLE, optimized_median_sinr DOUBLE,
+                            optimized_min_rsrp DOUBLE, optimized_min_rsrq DOUBLE, optimized_min_sinr DOUBLE,
+                            optimized_max_rsrp DOUBLE, optimized_max_rsrq DOUBLE, optimized_max_sinr DOUBLE,
+                            optimized_mode_rsrp DOUBLE, optimized_mode_rsrq DOUBLE, optimized_mode_sinr DOUBLE,
+
+                            diff_avg_rsrp DOUBLE, diff_avg_rsrq DOUBLE, diff_avg_sinr DOUBLE,
+                            diff_median_rsrp DOUBLE, diff_median_rsrq DOUBLE, diff_median_sinr DOUBLE,
+                            diff_min_rsrp DOUBLE, diff_min_rsrq DOUBLE, diff_min_sinr DOUBLE,
+                            diff_max_rsrp DOUBLE, diff_max_rsrq DOUBLE, diff_max_sinr DOUBLE,
+                            diff_mode_rsrp DOUBLE, diff_mode_rsrq DOUBLE, diff_mode_sinr DOUBLE,
+
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        );";
+                        await cmdCreate.ExecuteNonQueryAsync();
+                    }
+
+                    // Ensure newly introduced min/diff_min columns exist for older deployments.
+                    var requiredColumns = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["baseline_min_rsrp"] = "DOUBLE",
+                        ["baseline_min_rsrq"] = "DOUBLE",
+                        ["baseline_min_sinr"] = "DOUBLE",
+                        ["optimized_min_rsrp"] = "DOUBLE",
+                        ["optimized_min_rsrq"] = "DOUBLE",
+                        ["optimized_min_sinr"] = "DOUBLE",
+                        ["diff_min_rsrp"] = "DOUBLE",
+                        ["diff_min_rsrq"] = "DOUBLE",
+                        ["diff_min_sinr"] = "DOUBLE",
+                    };
+
+                    var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    await using (var cmdCols = conn.CreateCommand())
+                    {
+                        cmdCols.CommandText = @"
+                            SELECT COLUMN_NAME
+                            FROM information_schema.columns
+                            WHERE table_schema = DATABASE()
+                              AND table_name = 'grid_analytics_results';";
+
+                        await using var reader = await cmdCols.ExecuteReaderAsync();
+                        while (await reader.ReadAsync())
+                        {
+                            var colName = reader.IsDBNull(0) ? null : reader.GetString(0);
+                            if (!string.IsNullOrWhiteSpace(colName))
+                                existingColumns.Add(colName);
+                        }
+                    }
+
+                    var missingClauses = requiredColumns
+                        .Where(kv => !existingColumns.Contains(kv.Key))
+                        .Select(kv => $"ADD COLUMN `{kv.Key}` {kv.Value}")
+                        .ToList();
+
+                    if (missingClauses.Count > 0)
+                    {
+                        await using var cmdAlter = conn.CreateCommand();
+                        cmdAlter.CommandText =
+                            $"ALTER TABLE grid_analytics_results {string.Join(", ", missingClauses)};";
+                        await cmdAlter.ExecuteNonQueryAsync();
+                    }
+
+                    // Ensure index for fetch path (project_id + region_id).
+                    bool hasProjectRegionIndex = false;
+                    await using (var cmdIdxCheck = conn.CreateCommand())
+                    {
+                        cmdIdxCheck.CommandText = @"
+                            SELECT COUNT(1)
+                            FROM information_schema.statistics
+                            WHERE table_schema = DATABASE()
+                              AND table_name = 'grid_analytics_results'
+                              AND index_name = 'idx_gar_project_region';";
+                        hasProjectRegionIndex =
+                            Convert.ToInt32(await cmdIdxCheck.ExecuteScalarAsync() ?? 0) > 0;
+                    }
+
+                    if (!hasProjectRegionIndex)
+                    {
+                        await using var cmdCreateIdx = conn.CreateCommand();
+                        cmdCreateIdx.CommandText =
+                            "CREATE INDEX idx_gar_project_region ON grid_analytics_results (project_id, region_id);";
+                        await cmdCreateIdx.ExecuteNonQueryAsync();
+                    }
 
                     // ── 3. FETCH grid_size FROM tbl_project ──
                     double gridSizeMeters = gridSize ?? 0;
@@ -308,9 +412,6 @@ namespace SignalTracker.Controllers
                             diff_min_rsrp = diff.diff_min_rsrp, diff_min_rsrq = diff.diff_min_rsrq, diff_min_sinr = diff.diff_min_sinr,
                             diff_max_rsrp = diff.diff_max_rsrp, diff_max_rsrq = diff.diff_max_rsrq, diff_max_sinr = diff.diff_max_sinr,
                             diff_mode_rsrp = diff.diff_mode_rsrp, diff_mode_rsrq = diff.diff_mode_rsrq, diff_mode_sinr = diff.diff_mode_sinr,
-                            median_operator = MedianOperatorSymbol,
-                            max_operator = MaxOperatorSymbol,
-                            min_operator = MinOperatorSymbol,
                             created_at = DateTime.UtcNow
                         });
                     }
@@ -436,7 +537,7 @@ namespace SignalTracker.Controllers
             [FromQuery] int? regionId = null,
             [FromQuery] int? company_id = null)
         {
-                if (!await CanUseGridFeatureAsync())
+            if (!await CanUseGridFeatureAsync())
                 return StatusCode(403, new { Status = 0, Message = "Feature disabled in license: grid_fetch", Code = "FEATURE_NOT_ENABLED" });
 
             var sw = Stopwatch.StartNew();
@@ -444,7 +545,7 @@ namespace SignalTracker.Controllers
             // Auth & Scoping
             int targetCompanyId = _userScope.GetTargetCompanyId(User, company_id);
             bool isSuperAdmin = _userScope.IsSuperAdmin(User);
-                if (!isSuperAdmin && targetCompanyId == 0)
+            if (!isSuperAdmin && targetCompanyId == 0)
                 return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve company context." });
 
             try
@@ -473,9 +574,21 @@ namespace SignalTracker.Controllers
                     catch { }
                 }
 
+                // Check Table Exists
+                bool tableExists = false;
                 var conn = _db.Database.GetDbConnection();
                 await conn.OpenAsync();
-                await EnsureGridAnalyticsTableSchemaAsync(conn);
+                await using (var cmdSchema = conn.CreateCommand())
+                {
+                    cmdSchema.CommandText = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'grid_analytics_results';";
+                    var count = Convert.ToInt32(await cmdSchema.ExecuteScalarAsync());
+                    tableExists = count > 0;
+                }
+                
+                if(!tableExists) {
+                    await conn.CloseAsync();
+                    return Ok(new GridAnalyticsResponse { Status = 0, Message = "Table does not exist. Call ComputeAndStoreGridAnalytics first." });
+                }
 
                 // Fetch directly from DB using EF
                 List<grid_analytics_results> storedResults;
@@ -1403,10 +1516,7 @@ WHERE spo.tbl_project_id = @pid;";
                         diff_min_rsrp = s.diff_min_rsrp, diff_min_rsrq = s.diff_min_rsrq, diff_min_sinr = s.diff_min_sinr,
                         diff_max_rsrp = s.diff_max_rsrp, diff_max_rsrq = s.diff_max_rsrq, diff_max_sinr = s.diff_max_sinr,
                         diff_mode_rsrp = s.diff_mode_rsrp, diff_mode_rsrq = s.diff_mode_rsrq, diff_mode_sinr = s.diff_mode_sinr,
-                    },
-                    median_operator = s.median_operator ?? string.Empty,
-                    max_operator = s.max_operator ?? string.Empty,
-                    min_operator = s.min_operator ?? string.Empty
+                    }
                 });
             }
             return res;
@@ -1452,122 +1562,6 @@ WHERE spo.tbl_project_id = @pid;";
             p.ParameterName = name;
             p.Value = value ?? DBNull.Value;
             cmd.Parameters.Add(p);
-        }
-
-        private async Task EnsureGridAnalyticsTableSchemaAsync(DbConnection conn)
-        {
-            await using (var cmdCreate = conn.CreateCommand())
-            {
-                cmdCreate.CommandText = @"
-                        CREATE TABLE IF NOT EXISTS grid_analytics_results (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            project_id INT NOT NULL,
-                            region_id INT,
-                            grid_size_meters DOUBLE NOT NULL,
-                            grid_id VARCHAR(50) NOT NULL,
-                            center_lat DOUBLE NOT NULL,
-                            center_lon DOUBLE NOT NULL,
-                            min_lat DOUBLE NOT NULL,
-                            max_lat DOUBLE NOT NULL,
-                            min_lon DOUBLE NOT NULL,
-                            max_lon DOUBLE NOT NULL,
-                            baseline_point_count INT NOT NULL,
-                            optimized_point_count INT NOT NULL,
-
-                            baseline_avg_rsrp DOUBLE, baseline_avg_rsrq DOUBLE, baseline_avg_sinr DOUBLE,
-                            baseline_median_rsrp DOUBLE, baseline_median_rsrq DOUBLE, baseline_median_sinr DOUBLE,
-                            baseline_min_rsrp DOUBLE, baseline_min_rsrq DOUBLE, baseline_min_sinr DOUBLE,
-                            baseline_max_rsrp DOUBLE, baseline_max_rsrq DOUBLE, baseline_max_sinr DOUBLE,
-                            baseline_mode_rsrp DOUBLE, baseline_mode_rsrq DOUBLE, baseline_mode_sinr DOUBLE,
-
-                            optimized_avg_rsrp DOUBLE, optimized_avg_rsrq DOUBLE, optimized_avg_sinr DOUBLE,
-                            optimized_median_rsrp DOUBLE, optimized_median_rsrq DOUBLE, optimized_median_sinr DOUBLE,
-                            optimized_min_rsrp DOUBLE, optimized_min_rsrq DOUBLE, optimized_min_sinr DOUBLE,
-                            optimized_max_rsrp DOUBLE, optimized_max_rsrq DOUBLE, optimized_max_sinr DOUBLE,
-                            optimized_mode_rsrp DOUBLE, optimized_mode_rsrq DOUBLE, optimized_mode_sinr DOUBLE,
-
-                            diff_avg_rsrp DOUBLE, diff_avg_rsrq DOUBLE, diff_avg_sinr DOUBLE,
-                            diff_median_rsrp DOUBLE, diff_median_rsrq DOUBLE, diff_median_sinr DOUBLE,
-                            diff_min_rsrp DOUBLE, diff_min_rsrq DOUBLE, diff_min_sinr DOUBLE,
-                            diff_max_rsrp DOUBLE, diff_max_rsrq DOUBLE, diff_max_sinr DOUBLE,
-                            diff_mode_rsrp DOUBLE, diff_mode_rsrq DOUBLE, diff_mode_sinr DOUBLE,
-
-                            median_operator VARCHAR(32),
-                            max_operator VARCHAR(32),
-                            min_operator VARCHAR(32),
-
-                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                        );";
-                await cmdCreate.ExecuteNonQueryAsync();
-            }
-
-            var requiredColumns = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-            {
-                ["baseline_min_rsrp"] = "DOUBLE",
-                ["baseline_min_rsrq"] = "DOUBLE",
-                ["baseline_min_sinr"] = "DOUBLE",
-                ["optimized_min_rsrp"] = "DOUBLE",
-                ["optimized_min_rsrq"] = "DOUBLE",
-                ["optimized_min_sinr"] = "DOUBLE",
-                ["diff_min_rsrp"] = "DOUBLE",
-                ["diff_min_rsrq"] = "DOUBLE",
-                ["diff_min_sinr"] = "DOUBLE",
-                ["median_operator"] = "VARCHAR(32)",
-                ["max_operator"] = "VARCHAR(32)",
-                ["min_operator"] = "VARCHAR(32)",
-            };
-
-            var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            await using (var cmdCols = conn.CreateCommand())
-            {
-                cmdCols.CommandText = @"
-                    SELECT COLUMN_NAME
-                    FROM information_schema.columns
-                    WHERE table_schema = DATABASE()
-                      AND table_name = 'grid_analytics_results';";
-
-                await using var reader = await cmdCols.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
-                {
-                    var colName = reader.IsDBNull(0) ? null : reader.GetString(0);
-                    if (!string.IsNullOrWhiteSpace(colName))
-                        existingColumns.Add(colName);
-                }
-            }
-
-            var missingClauses = requiredColumns
-                .Where(kv => !existingColumns.Contains(kv.Key))
-                .Select(kv => $"ADD COLUMN `{kv.Key}` {kv.Value}")
-                .ToList();
-
-            if (missingClauses.Count > 0)
-            {
-                await using var cmdAlter = conn.CreateCommand();
-                cmdAlter.CommandText =
-                    $"ALTER TABLE grid_analytics_results {string.Join(", ", missingClauses)};";
-                await cmdAlter.ExecuteNonQueryAsync();
-            }
-
-            bool hasProjectRegionIndex = false;
-            await using (var cmdIdxCheck = conn.CreateCommand())
-            {
-                cmdIdxCheck.CommandText = @"
-                    SELECT COUNT(1)
-                    FROM information_schema.statistics
-                    WHERE table_schema = DATABASE()
-                      AND table_name = 'grid_analytics_results'
-                      AND index_name = 'idx_gar_project_region';";
-                hasProjectRegionIndex =
-                    Convert.ToInt32(await cmdIdxCheck.ExecuteScalarAsync() ?? 0) > 0;
-            }
-
-            if (!hasProjectRegionIndex)
-            {
-                await using var cmdCreateIdx = conn.CreateCommand();
-                cmdCreateIdx.CommandText =
-                    "CREATE INDEX idx_gar_project_region ON grid_analytics_results (project_id, region_id);";
-                await cmdCreateIdx.ExecuteNonQueryAsync();
-            }
         }
 
         // =====================================================================
@@ -1637,9 +1631,6 @@ WHERE spo.tbl_project_id = @pid;";
             public GridMetrics baseline { get; set; } = new();
             public GridMetrics optimized { get; set; } = new();
             public GridDifference difference { get; set; } = new();
-            public string median_operator { get; set; } = "";
-            public string max_operator { get; set; } = "";
-            public string min_operator { get; set; } = "";
         }
 
         public class GridMetrics
