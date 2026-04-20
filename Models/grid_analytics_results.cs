@@ -98,6 +98,18 @@ namespace SignalTracker.Models
         [Column("diff_mode_rsrq")]  public double? diff_mode_rsrq { get; set; }
         [Column("diff_mode_sinr")]  public double? diff_mode_sinr { get; set; }
 
+        [Column("median_operator")]
+        [StringLength(32)]
+        public string? median_operator { get; set; }
+
+        [Column("max_operator")]
+        [StringLength(32)]
+        public string? max_operator { get; set; }
+
+        [Column("min_operator")]
+        [StringLength(32)]
+        public string? min_operator { get; set; }
+
         [Column("created_at")]
         public DateTime? created_at { get; set; }
     }
