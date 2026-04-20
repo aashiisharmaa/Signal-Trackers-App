@@ -16,8 +16,9 @@ namespace SignalTracker.Controllers
     [Route("Home")]
     public class HomeController : Controller
     {
-        private const string GlobalLoginLockKey = "auth:global-login-lock";
-        private const int GlobalLoginLockTtlSeconds = 18000;
+        private const string LegacyGlobalLoginLockKey = "auth:global-login-lock";
+        private const string UserLoginLockKeyPrefix = "auth:login-lock:user:";
+        private const int UserLoginLockTtlSeconds = 18000;
 
         private readonly ApplicationDbContext _db;
         private readonly CommonFunction? _cf = null;
@@ -137,6 +138,7 @@ namespace SignalTracker.Controllers
             var sw = Stopwatch.StartNew();
             bool lockAcquired = false;
             bool loginCompleted = false;
+            string? userLockKey = null;
             try
             {
                 if (obj == null || string.IsNullOrWhiteSpace(obj.Email) || string.IsNullOrWhiteSpace(obj.Password))
@@ -185,7 +187,16 @@ namespace SignalTracker.Controllers
                 }
 
                 var lockValue = $"{user!.id}:{user.email}:{DateTimeOffset.UtcNow:O}";
-                lockAcquired = await _redis.TrySetStringAsync(GlobalLoginLockKey, lockValue, GlobalLoginLockTtlSeconds);
+                userLockKey = BuildUserLoginLockKey(user.id);
+
+                if (obj.ForceLogin == true)
+                {
+                    await _redis.DeleteAsync(userLockKey);
+                    // Backward compatibility: clear old single global lock key as well.
+                    await _redis.DeleteAsync(LegacyGlobalLoginLockKey);
+                }
+
+                lockAcquired = await _redis.TrySetStringAsync(userLockKey, lockValue, UserLoginLockTtlSeconds);
                 if (!lockAcquired)
                 {
                     return Json(new { success = false, message = "Sorry, someone is already logged in. Please try again later." });
@@ -254,8 +265,8 @@ namespace SignalTracker.Controllers
                 {
                     try
                     {
-                        if (_redis?.IsConnected == true)
-                            await _redis.DeleteAsync(GlobalLoginLockKey);
+                        if (_redis?.IsConnected == true && !string.IsNullOrWhiteSpace(userLockKey))
+                            await _redis.DeleteAsync(userLockKey);
                     }
                     catch { }
                 }
@@ -416,7 +427,17 @@ namespace SignalTracker.Controllers
 
                 if (_redis?.IsConnected == true)
                 {
-                    await _redis.DeleteAsync(GlobalLoginLockKey);
+                    var claimUserId = User?.FindFirst("UserId")?.Value;
+                    var sessionUserId = HttpContext?.Session.GetInt32("UserID")?.ToString();
+                    var userIdValue = !string.IsNullOrWhiteSpace(claimUserId) ? claimUserId : sessionUserId;
+
+                    if (int.TryParse(userIdValue, out var parsedUserId) && parsedUserId > 0)
+                    {
+                        await _redis.DeleteAsync(BuildUserLoginLockKey(parsedUserId));
+                    }
+
+                    // Backward compatibility: clear old single global lock key.
+                    await _redis.DeleteAsync(LegacyGlobalLoginLockKey);
                 }
 
             }
@@ -427,6 +448,9 @@ namespace SignalTracker.Controllers
 
             return Ok(new { success = true, message = "Logged out successfully." });
         }
+
+        private static string BuildUserLoginLockKey(int userId)
+            => $"{UserLoginLockKeyPrefix}{userId}";
 
         #endregion
 

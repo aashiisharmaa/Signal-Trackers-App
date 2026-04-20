@@ -17,6 +17,7 @@ namespace SignalTracker.Models
         public string Email { get; set; }
         public string Password { get; set; }
         public string? country_code { get; set; }
+        public bool? ForceLogin { get; set; }
         public string Captcha { get; set; }
         public string IP { get; set; }
     }
