@@ -14,11 +14,6 @@ internal class Program
     private static void Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
-        var isDevelopment = builder.Environment.IsDevelopment();
-        // Chrome rejects SameSite=None cookies unless Secure=true.
-        // For local HTTP dev, use Lax + non-secure cookies.
-        var cookieSameSite = isDevelopment ? SameSiteMode.Lax : SameSiteMode.None;
-        var cookieSecurePolicy = isDevelopment ? CookieSecurePolicy.None : CookieSecurePolicy.Always;
 
         // ----------------------------------------------------
         // CONTROLLERS & JSON
@@ -161,8 +156,10 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
             options.Cookie.Name = "st.session";
             options.Cookie.HttpOnly = true;
             options.Cookie.IsEssential = true;
-            options.Cookie.SameSite = cookieSameSite;
-            options.Cookie.SecurePolicy = cookieSecurePolicy;
+            // Electron renderer often runs from file:// in dev, which is cross-site to localhost.
+            // Use SameSite=None so session cookie can be sent on XHR/fetch requests.
+            options.Cookie.SameSite = SameSiteMode.None;
+            options.Cookie.SecurePolicy = CookieSecurePolicy.None;
         });
 
         // ----------------------------------------------------
@@ -173,8 +170,10 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
             {
                 options.Cookie.Name = "st.auth";
                 options.Cookie.HttpOnly = true;
-                options.Cookie.SameSite = cookieSameSite;
-                options.Cookie.SecurePolicy = cookieSecurePolicy;
+                // Electron renderer often runs from file:// in dev, which is cross-site to localhost.
+                // Use SameSite=None so auth cookie can be sent on API calls.
+                options.Cookie.SameSite = SameSiteMode.None;
+                options.Cookie.SecurePolicy = CookieSecurePolicy.None;
                 options.ExpireTimeSpan = TimeSpan.FromMinutes(300);
                 options.SlidingExpiration = true;
 
@@ -214,9 +213,9 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
         // ----------------------------------------------------
         builder.Services.Configure<CookiePolicyOptions>(o =>
         {
-            o.MinimumSameSitePolicy = SameSiteMode.Unspecified;
+            o.MinimumSameSitePolicy = SameSiteMode.None;
             o.HttpOnly = HttpOnlyPolicy.Always;
-            o.Secure = cookieSecurePolicy;
+            o.Secure = CookieSecurePolicy.None;
         });
 
         // ----------------------------------------------------
