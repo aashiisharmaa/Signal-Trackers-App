@@ -6234,7 +6234,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] string? technology = null,
             [FromQuery] int? band = null,
             [FromQuery] int? pci = null,
-            [FromQuery] int limit = 2000,
+            [FromQuery] int limit = 5000,
             [FromQuery] int offset = 0,
             [FromQuery] string version = "combined")
         {
@@ -6273,7 +6273,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
                 await SetMapViewCacheAsync(cacheKey, cachedRows);
 
-                var cachedPageRows = SliceCachedPage(cachedRows, Math.Clamp(limit, 1, 2000), Math.Max(offset, 0));
+                var cachedPageRows = SliceCachedPage(cachedRows, Math.Clamp(limit, 1, 5000), Math.Max(offset, 0));
                 return Json(new
                 {
                     Status = 1,
