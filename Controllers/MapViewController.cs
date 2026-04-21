@@ -37,6 +37,7 @@ namespace SignalTracker.Controllers
         private readonly RedisService _redis;
         private readonly UserScopeService _userScope;
         private const int MapViewCacheTtlSeconds = 300;
+        private const string SitePredictionCacheVersion = "carrierfix-v2";
         private static readonly string[] MapViewCacheInvalidationPatterns =
         {
             "mapview:*",
@@ -5904,6 +5905,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             string siteExpr,
             string cellExpr,
             string clusterExpr,
+            string projectProviderExpr,
             string technologyExpr,
             string bandExpr,
             string pciExpr)
@@ -5912,7 +5914,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
             if (site.HasValue) filters.Add($"{siteExpr} = @site");
             if (!string.IsNullOrWhiteSpace(cellId)) filters.Add($"CONVERT({cellExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @cell");
-            if (!string.IsNullOrWhiteSpace(cluster)) filters.Add($"CONVERT({clusterExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @clus");
+            if (!string.IsNullOrWhiteSpace(cluster)) filters.Add($"((CONVERT({clusterExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @clus) OR (CONVERT({projectProviderExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @clus))");
             if (!string.IsNullOrWhiteSpace(technology)) filters.Add($"CONVERT({technologyExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @tech");
             if (band.HasValue) filters.Add($"{bandExpr} = @band");
             if (pci.HasValue) filters.Add($"{pciExpr} = @pci");
@@ -5933,6 +5935,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             string updatedCellExpr,
             string originalClusterExpr,
             string updatedClusterExpr,
+            string originalProjectProviderExpr,
+            string updatedProjectProviderExpr,
             string originalTechnologyExpr,
             string updatedTechnologyExpr,
             string originalBandExpr,
@@ -5954,7 +5958,12 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
 
             if (!string.IsNullOrWhiteSpace(cluster))
             {
-                filters.Add($"((CONVERT({updatedClusterExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @clus) OR (CONVERT({originalClusterExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @clus))");
+                filters.Add($@"(
+                    (CONVERT({updatedClusterExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @clus)
+                    OR (CONVERT({originalClusterExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @clus)
+                    OR (CONVERT({updatedProjectProviderExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @clus)
+                    OR (CONVERT({originalProjectProviderExpr} USING utf8mb4) COLLATE utf8mb4_unicode_ci = @clus)
+                )");
             }
 
             if (!string.IsNullOrWhiteSpace(technology))
@@ -5990,6 +5999,116 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             if (!string.IsNullOrWhiteSpace(technology)) Add(cmd, "@tech", technology.Trim());
             if (band.HasValue) Add(cmd, "@band", band.Value);
             if (pci.HasValue) Add(cmd, "@pci", pci.Value);
+        }
+
+        private static string? NormalizeSitePredictionOperator(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+
+            var s = value.Trim().ToLowerInvariant();
+            if (s.Contains("airtel") || s.Contains("bharti")) return "airtel";
+            if (s.Contains("jio") || s.Contains("reliance")) return "jio";
+            if (s == "vi" || s.StartsWith("vi ") || s.StartsWith("vi-") || s.StartsWith("vi_") ||
+                s.Contains("vodafone") || s.Contains("vodaphone") || s.Contains("vodafone idea") || s.Contains("idea"))
+                return "vi";
+            if (s.Contains("bsnl")) return "bsnl";
+            return null;
+        }
+
+        private static string? ResolveSitePredictionOperator(string? cluster, string? bandRaw, string? earfcnRaw, string? frequency)
+        {
+            var normalizedCluster = NormalizeSitePredictionOperator(cluster);
+            if (!string.IsNullOrWhiteSpace(normalizedCluster))
+                return normalizedCluster;
+
+            if (int.TryParse(earfcnRaw?.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var earfcn))
+            {
+                switch (earfcn)
+                {
+                    case 315:
+                        return "airtel";
+                    case 3676:
+                        return "vi";
+                    case 39150:
+                        return "jio";
+                }
+            }
+
+            if (int.TryParse(bandRaw?.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var band))
+            {
+                switch (band)
+                {
+                    case 1:
+                    case 3:
+                    case 41:
+                        return "airtel";
+                    case 8:
+                        return "vi";
+                    case 5:
+                    case 28:
+                    case 40:
+                    case 78:
+                        return "jio";
+                }
+            }
+
+            var f = frequency?.Trim().ToLowerInvariant() ?? string.Empty;
+            if (f.Contains("1800")) return "airtel";
+            if (f.Contains("900")) return "vi";
+            if (f.Contains("700")) return "jio";
+            if (f.Contains("2300")) return "jio";
+            if (f.Contains("3300") || f.Contains("3500")) return "jio";
+
+            return null;
+        }
+
+        private static string? ReadSitePredictionText(Dictionary<string, object?> row, params string[] keys)
+        {
+            foreach (var key in keys)
+            {
+                if (!row.TryGetValue(key, out var value) || value == null || value is DBNull)
+                    continue;
+
+                var text = Convert.ToString(value, CultureInfo.InvariantCulture);
+                if (!string.IsNullOrWhiteSpace(text))
+                    return text;
+            }
+
+            return null;
+        }
+
+        private static void EnrichSitePredictionRow(Dictionary<string, object?> row)
+        {
+            var originalCluster = ReadSitePredictionText(row, "original_cluster");
+            var clusterValue = ReadSitePredictionText(row, "cluster");
+            var optimizedCluster = ReadSitePredictionText(row, "optimized_cluster");
+            var projectProvider = ReadSitePredictionText(row, "project_provider");
+            var bandRaw = ReadSitePredictionText(row, "band");
+            var earfcnRaw = ReadSitePredictionText(row, "earfcn");
+            var frequency = ReadSitePredictionText(row, "frequency");
+
+            var rawCluster = originalCluster ?? clusterValue ?? optimizedCluster ?? projectProvider;
+            row["raw_cluster"] = rawCluster;
+
+            var provider =
+                NormalizeSitePredictionOperator(originalCluster)
+                ?? NormalizeSitePredictionOperator(clusterValue)
+                ?? NormalizeSitePredictionOperator(optimizedCluster)
+                ?? NormalizeSitePredictionOperator(projectProvider)
+                ?? ResolveSitePredictionOperator(rawCluster, bandRaw, earfcnRaw, frequency)
+                ?? projectProvider;
+            if (!string.IsNullOrWhiteSpace(provider))
+            {
+                row["provider"] = provider;
+                row["operator_name"] = provider;
+                row["cluster"] = provider;
+            }
+            else if (!string.IsNullOrWhiteSpace(rawCluster))
+            {
+                row["provider"] = rawCluster;
+                row["operator_name"] = rawCluster;
+            }
         }
 
         private async Task EnsureSitePredictionOptimizedTableAsync(DbConnection conn)
@@ -6115,7 +6234,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             [FromQuery] string? technology = null,
             [FromQuery] int? band = null,
             [FromQuery] int? pci = null,
-            [FromQuery] int limit = 200,
+            [FromQuery] int limit = 2000,
             [FromQuery] int offset = 0,
             [FromQuery] string version = "combined")
         {
@@ -6134,7 +6253,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             }
 
             var cacheKey = BuildMapViewCacheKey(
-                "site-prediction-full",
+                $"site-prediction-full-{SitePredictionCacheVersion}",
                 projectId,
                 site,
                 cell_id,
@@ -6147,6 +6266,13 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             var cachedRows = await TryGetMapViewCacheAsync<List<Dictionary<string, object?>>>(cacheKey);
             if (cachedRows != null)
             {
+                foreach (var row in cachedRows)
+                {
+                    EnrichSitePredictionRow(row);
+                }
+
+                await SetMapViewCacheAsync(cacheKey, cachedRows);
+
                 var cachedPageRows = SliceCachedPage(cachedRows, Math.Clamp(limit, 1, 2000), Math.Max(offset, 0));
                 return Json(new
                 {
@@ -6181,6 +6307,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     "spo.cell_id",
                     "sp.cluster",
                     "spo.cluster",
+                    "p.provider",
+                    "p.provider",
                     "sp.Technology",
                     "spo.Technology",
                     "sp.band",
@@ -6197,6 +6325,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     "sp.site",
                     "sp.cell_id",
                     "sp.cluster",
+                    "p.provider",
                     "sp.Technology",
                     "sp.band",
                     "sp.pci");
@@ -6255,11 +6384,15 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     COALESCE(spo.uplink_center_frequency, sp.uplink_center_frequency) AS uplink_center_frequency,
                     COALESCE(spo.downlink_frequency, sp.downlink_frequency) AS downlink_frequency,
                     COALESCE(spo.earfcn, sp.earfcn) AS earfcn,
+                    CONVERT(p.provider USING utf8mb4) COLLATE utf8mb4_unicode_ci AS project_provider,
+                    CONVERT(sp.cluster USING utf8mb4) COLLATE utf8mb4_unicode_ci AS original_cluster,
+                    CONVERT(spo.cluster USING utf8mb4) COLLATE utf8mb4_unicode_ci AS optimized_cluster,
                     CONVERT(COALESCE(spo.cluster, sp.cluster) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS cluster,
                     sp.tbl_project_id,
                     COALESCE(spo.tbl_upload_id, sp.tbl_upload_id) AS tbl_upload_id,
                     CONVERT(COALESCE(spo.Technology, sp.Technology) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS Technology
                 FROM site_prediction sp
+                LEFT JOIN tbl_project p ON p.id = sp.tbl_project_id
                 LEFT JOIN site_prediction_optimized spo
                     ON spo.id = (
                         SELECT o.id
@@ -6334,11 +6467,15 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     sp.uplink_center_frequency,
                     sp.downlink_frequency,
                     sp.earfcn,
-                    sp.cluster,
+                    CONVERT(p.provider USING utf8mb4) COLLATE utf8mb4_unicode_ci AS project_provider,
+                    sp.cluster AS original_cluster,
+                    NULL AS optimized_cluster,
+                    sp.cluster AS cluster,
                     sp.tbl_project_id,
                     sp.tbl_upload_id,
                     sp.Technology
                 FROM site_prediction sp
+                LEFT JOIN tbl_project p ON p.id = sp.tbl_project_id
                 WHERE sp.tbl_project_id = @pid
                 {filterClause}
                 ORDER BY sp.id DESC;";
@@ -6355,6 +6492,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 {
                     row[r.GetName(i)] = await r.IsDBNullAsync(i) ? null : r.GetValue(i);
                 }
+                EnrichSitePredictionRow(row);
                 list.Add(row);
             }
 
@@ -6387,7 +6525,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 return BadRequest(new { Status = 0, Message = "projectId is required" });
 
             var cacheKey = BuildMapViewCacheKey(
-                "site-prediction-compare",
+                $"site-prediction-compare-{SitePredictionCacheVersion}",
                 projectId,
                 site,
                 cell_id,
@@ -6454,6 +6592,8 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 "spo.cell_id",
                 "sp.cluster",
                 "spo.cluster",
+                "p.provider",
+                "p.provider",
                 "sp.Technology",
                 "spo.Technology",
                 "sp.band",
@@ -6472,6 +6612,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                 SELECT
                     {compareSelectColumns}
                 FROM site_prediction sp
+                LEFT JOIN tbl_project p ON p.id = sp.tbl_project_id
                 INNER JOIN site_prediction_optimized spo
                     ON spo.id = (
                         SELECT o.id

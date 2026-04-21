@@ -1345,8 +1345,9 @@ WHERE spo.tbl_project_id = @pid;";
             if (double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out var asDouble))
             {
                 if (Math.Abs(asDouble - Math.Round(asDouble)) < 0.0000001)
-                    return Math.Round(asDouble).ToString(CultureInfo.InvariantCulture)
-                    return asDouble.ToString("0.########", CultureInfo.InvariantCulture);
+                    return Math.Round(asDouble).ToString(CultureInfo.InvariantCulture);
+
+                return asDouble.ToString("0.########", CultureInfo.InvariantCulture);
             }
 
             return trimmed.ToLowerInvariant();
