@@ -119,18 +119,12 @@ namespace SignalTracker.Controllers
                             baseline_min_rsrp DOUBLE, baseline_min_rsrq DOUBLE, baseline_min_sinr DOUBLE,
                             baseline_max_rsrp DOUBLE, baseline_max_rsrq DOUBLE, baseline_max_sinr DOUBLE,
                             baseline_mode_rsrp DOUBLE, baseline_mode_rsrq DOUBLE, baseline_mode_sinr DOUBLE,
-                            baseline_best_operator_avg VARCHAR(100),
-                            baseline_best_operator_min VARCHAR(100),
-                            baseline_best_operator_max VARCHAR(100),
 
                             optimized_avg_rsrp DOUBLE, optimized_avg_rsrq DOUBLE, optimized_avg_sinr DOUBLE,
                             optimized_median_rsrp DOUBLE, optimized_median_rsrq DOUBLE, optimized_median_sinr DOUBLE,
                             optimized_min_rsrp DOUBLE, optimized_min_rsrq DOUBLE, optimized_min_sinr DOUBLE,
                             optimized_max_rsrp DOUBLE, optimized_max_rsrq DOUBLE, optimized_max_sinr DOUBLE,
                             optimized_mode_rsrp DOUBLE, optimized_mode_rsrq DOUBLE, optimized_mode_sinr DOUBLE,
-                            optimized_best_operator_avg VARCHAR(100),
-                            optimized_best_operator_min VARCHAR(100),
-                            optimized_best_operator_max VARCHAR(100),
 
                             diff_avg_rsrp DOUBLE, diff_avg_rsrq DOUBLE, diff_avg_sinr DOUBLE,
                             diff_median_rsrp DOUBLE, diff_median_rsrq DOUBLE, diff_median_sinr DOUBLE,
@@ -155,12 +149,6 @@ namespace SignalTracker.Controllers
                         ["diff_min_rsrp"] = "DOUBLE",
                         ["diff_min_rsrq"] = "DOUBLE",
                         ["diff_min_sinr"] = "DOUBLE",
-                        ["baseline_best_operator_avg"] = "VARCHAR(100)",
-                        ["baseline_best_operator_min"] = "VARCHAR(100)",
-                        ["baseline_best_operator_max"] = "VARCHAR(100)",
-                        ["optimized_best_operator_avg"] = "VARCHAR(100)",
-                        ["optimized_best_operator_min"] = "VARCHAR(100)",
-                        ["optimized_best_operator_max"] = "VARCHAR(100)",
                     };
 
                     var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -412,18 +400,12 @@ namespace SignalTracker.Controllers
                             baseline_min_rsrp = bm.min_rsrp, baseline_min_rsrq = bm.min_rsrq, baseline_min_sinr = bm.min_sinr,
                             baseline_max_rsrp = bm.max_rsrp, baseline_max_rsrq = bm.max_rsrq, baseline_max_sinr = bm.max_sinr,
                             baseline_mode_rsrp = bm.mode_rsrp, baseline_mode_rsrq = bm.mode_rsrq, baseline_mode_sinr = bm.mode_sinr,
-                            baseline_best_operator_avg = bm.best_operator_avg,
-                            baseline_best_operator_min = bm.best_operator_min,
-                            baseline_best_operator_max = bm.best_operator_max,
 
                             optimized_avg_rsrp = om.avg_rsrp, optimized_avg_rsrq = om.avg_rsrq, optimized_avg_sinr = om.avg_sinr,
                             optimized_median_rsrp = om.median_rsrp, optimized_median_rsrq = om.median_rsrq, optimized_median_sinr = om.median_sinr,
                             optimized_min_rsrp = om.min_rsrp, optimized_min_rsrq = om.min_rsrq, optimized_min_sinr = om.min_sinr,
                             optimized_max_rsrp = om.max_rsrp, optimized_max_rsrq = om.max_rsrq, optimized_max_sinr = om.max_sinr,
                             optimized_mode_rsrp = om.mode_rsrp, optimized_mode_rsrq = om.mode_rsrq, optimized_mode_sinr = om.mode_sinr,
-                            optimized_best_operator_avg = om.best_operator_avg,
-                            optimized_best_operator_min = om.best_operator_min,
-                            optimized_best_operator_max = om.best_operator_max,
 
                             diff_avg_rsrp = diff.diff_avg_rsrp, diff_avg_rsrq = diff.diff_avg_rsrq, diff_avg_sinr = diff.diff_avg_sinr,
                             diff_median_rsrp = diff.diff_median_rsrp, diff_median_rsrq = diff.diff_median_rsrq, diff_median_sinr = diff.diff_median_sinr,
@@ -608,57 +590,6 @@ namespace SignalTracker.Controllers
                     return Ok(new GridAnalyticsResponse { Status = 0, Message = "Table does not exist. Call ComputeAndStoreGridAnalytics first." });
                 }
 
-                // Ensure older deployments have all required columns before EF projection.
-                var requiredColumns = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    ["baseline_min_rsrp"] = "DOUBLE",
-                    ["baseline_min_rsrq"] = "DOUBLE",
-                    ["baseline_min_sinr"] = "DOUBLE",
-                    ["optimized_min_rsrp"] = "DOUBLE",
-                    ["optimized_min_rsrq"] = "DOUBLE",
-                    ["optimized_min_sinr"] = "DOUBLE",
-                    ["diff_min_rsrp"] = "DOUBLE",
-                    ["diff_min_rsrq"] = "DOUBLE",
-                    ["diff_min_sinr"] = "DOUBLE",
-                    ["baseline_best_operator_avg"] = "VARCHAR(100)",
-                    ["baseline_best_operator_min"] = "VARCHAR(100)",
-                    ["baseline_best_operator_max"] = "VARCHAR(100)",
-                    ["optimized_best_operator_avg"] = "VARCHAR(100)",
-                    ["optimized_best_operator_min"] = "VARCHAR(100)",
-                    ["optimized_best_operator_max"] = "VARCHAR(100)",
-                };
-
-                var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                await using (var cmdCols = conn.CreateCommand())
-                {
-                    cmdCols.CommandText = @"
-                        SELECT COLUMN_NAME
-                        FROM information_schema.columns
-                        WHERE table_schema = DATABASE()
-                          AND table_name = 'grid_analytics_results';";
-
-                    await using var reader = await cmdCols.ExecuteReaderAsync();
-                    while (await reader.ReadAsync())
-                    {
-                        var colName = reader.IsDBNull(0) ? null : reader.GetString(0);
-                        if (!string.IsNullOrWhiteSpace(colName))
-                            existingColumns.Add(colName);
-                    }
-                }
-
-                var missingClauses = requiredColumns
-                    .Where(kv => !existingColumns.Contains(kv.Key))
-                    .Select(kv => $"ADD COLUMN `{kv.Key}` {kv.Value}")
-                    .ToList();
-
-                if (missingClauses.Count > 0)
-                {
-                    await using var cmdAlter = conn.CreateCommand();
-                    cmdAlter.CommandText =
-                        $"ALTER TABLE grid_analytics_results {string.Join(", ", missingClauses)};";
-                    await cmdAlter.ExecuteNonQueryAsync();
-                }
-
                 // Fetch directly from DB using EF
                 List<grid_analytics_results> storedResults;
                 if (regionId.HasValue && regionId.Value > 0)
@@ -813,35 +744,6 @@ namespace SignalTracker.Controllers
                         optimizedTotalRows = Convert.ToInt32(await cmdOptCount.ExecuteScalarAsync() ?? 0);
                     }
 
-                    static async Task<bool> TableHasColumnAsync(DbConnection c, string table, string column)
-                    {
-                        await using var cmd = c.CreateCommand();
-                        cmd.CommandText = @"
-                            SELECT COUNT(1)
-                            FROM information_schema.columns
-                            WHERE table_schema = DATABASE()
-                              AND table_name = @table
-                              AND column_name = @column;";
-                        AddParam(cmd, "@table", table);
-                        AddParam(cmd, "@column", column);
-                        return Convert.ToInt32(await cmd.ExecuteScalarAsync() ?? 0) > 0;
-                    }
-
-                    var spHasTxPower = await TableHasColumnAsync(conn, "site_prediction", "tx_power");
-                    var spHasLegacyTxPower = await TableHasColumnAsync(conn, "site_prediction", "maximum_transmission_power_of_resource");
-                    var spoHasTxPower = await TableHasColumnAsync(conn, "site_prediction_optimized", "tx_power");
-                    var spoHasLegacyTxPower = await TableHasColumnAsync(conn, "site_prediction_optimized", "maximum_transmission_power_of_resource");
-
-                    static string ResolveTxPowerExpr(string alias, bool hasTxPower, bool hasLegacyTxPower)
-                    {
-                        if (hasTxPower) return $"{alias}.`tx_power`";
-                        if (hasLegacyTxPower) return $"{alias}.`maximum_transmission_power_of_resource`";
-                        return "NULL";
-                    }
-
-                    var baselineTxPowerExpr = ResolveTxPowerExpr("sp", spHasTxPower, spHasLegacyTxPower);
-                    var optimizedTxPowerExpr = ResolveTxPowerExpr("spo", spoHasTxPower, spoHasLegacyTxPower);
-
                     var compareFields = new[]
                     {
                         "site", "sector", "cell_id",
@@ -865,7 +767,7 @@ namespace SignalTracker.Controllers
                     var changedSectorDetails = new List<CoverageChangedSectorDetail>();
 
                     await using var cmdCompare = conn.CreateCommand();
-                    cmdCompare.CommandText = $@"
+                    cmdCompare.CommandText = @"
                         SELECT
                             sp.id AS baseline_id,
                             sp.site AS baseline_site,
@@ -880,7 +782,7 @@ namespace SignalTracker.Controllers
                             sp.bw AS baseline_bw,
                             sp.m_tilt AS baseline_m_tilt,
                             sp.e_tilt AS baseline_e_tilt,
-                            {baselineTxPowerExpr} AS baseline_maximum_transmission_power_of_resource,
+                            sp.tx_power AS baseline_maximum_transmission_power_of_resource,
                             sp.real_transmit_power_of_resource AS baseline_real_transmit_power_of_resource,
                             sp.reference_signal_power AS baseline_reference_signal_power,
                             sp.cellsize AS baseline_cellsize,
@@ -904,7 +806,7 @@ namespace SignalTracker.Controllers
                             spo.bw AS optimized_bw,
                             spo.m_tilt AS optimized_m_tilt,
                             spo.e_tilt AS optimized_e_tilt,
-                            {optimizedTxPowerExpr} AS optimized_maximum_transmission_power_of_resource,
+                            spo.tx_power AS optimized_maximum_transmission_power_of_resource,
                             spo.real_transmit_power_of_resource AS optimized_real_transmit_power_of_resource,
                             spo.reference_signal_power AS optimized_reference_signal_power,
                             spo.cellsize AS optimized_cellsize,
@@ -1227,7 +1129,6 @@ SELECT
     pred_sinr,
     node_b_id,
     cell_id,
-    `operator`,
     site_id,
     nodeb_id_cell_id
 FROM `{table}`
@@ -1264,9 +1165,8 @@ WHERE project_id = @pid";
                     Sinr = rdr.IsDBNull(4) ? null : Convert.ToDouble(rdr.GetValue(4)),
                     NodeBId = rdr.IsDBNull(5) ? null : rdr.GetValue(5)?.ToString(),
                     CellId = rdr.IsDBNull(6) ? null : rdr.GetValue(6)?.ToString(),
-                    Operator = rdr.IsDBNull(7) ? null : rdr.GetValue(7)?.ToString(),
-                    SiteId = rdr.IsDBNull(8) ? null : rdr.GetValue(8)?.ToString(),
-                    NodebIdCellId = rdr.IsDBNull(9) ? null : rdr.GetValue(9)?.ToString(),
+                    SiteId = rdr.IsDBNull(7) ? null : rdr.GetValue(7)?.ToString(),
+                    NodebIdCellId = rdr.IsDBNull(8) ? null : rdr.GetValue(8)?.ToString(),
                 });
             }
 
@@ -1445,9 +1345,8 @@ WHERE spo.tbl_project_id = @pid;";
             if (double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out var asDouble))
             {
                 if (Math.Abs(asDouble - Math.Round(asDouble)) < 0.0000001)
-                    return Math.Round(asDouble).ToString(CultureInfo.InvariantCulture);
-
-                return asDouble.ToString("0.########", CultureInfo.InvariantCulture);
+                    return Math.Round(asDouble).ToString(CultureInfo.InvariantCulture)
+                    return asDouble.ToString("0.########", CultureInfo.InvariantCulture);
             }
 
             return trimmed.ToLowerInvariant();
@@ -1561,10 +1460,7 @@ WHERE spo.tbl_project_id = @pid;";
                 median_rsrp = Median(rp), median_rsrq = Median(rq), median_sinr = Median(sn),
                 min_rsrp = Min(rp), min_rsrq = Min(rq), min_sinr = Min(sn),
                 max_rsrp = Max(rp), max_rsrq = Max(rq), max_sinr = Max(sn),
-                mode_rsrp = Mode(rp), mode_rsrq = Mode(rq), mode_sinr = Mode(sn),
-                best_operator_avg = BestOperatorBy(pts, Avg),
-                best_operator_min = BestOperatorBy(pts, Min),
-                best_operator_max = BestOperatorBy(pts, Max)
+                mode_rsrp = Mode(rp), mode_rsrq = Mode(rq), mode_sinr = Mode(sn)
             };
         }
 
@@ -1602,9 +1498,6 @@ WHERE spo.tbl_project_id = @pid;";
                         min_rsrp = s.baseline_min_rsrp, min_rsrq = s.baseline_min_rsrq, min_sinr = s.baseline_min_sinr,
                         max_rsrp = s.baseline_max_rsrp, max_rsrq = s.baseline_max_rsrq, max_sinr = s.baseline_max_sinr,
                         mode_rsrp = s.baseline_mode_rsrp, mode_rsrq = s.baseline_mode_rsrq, mode_sinr = s.baseline_mode_sinr,
-                        best_operator_avg = s.baseline_best_operator_avg,
-                        best_operator_min = s.baseline_best_operator_min,
-                        best_operator_max = s.baseline_best_operator_max,
                     },
                     optimized = new GridMetrics
                     {
@@ -1614,9 +1507,6 @@ WHERE spo.tbl_project_id = @pid;";
                         min_rsrp = s.optimized_min_rsrp, min_rsrq = s.optimized_min_rsrq, min_sinr = s.optimized_min_sinr,
                         max_rsrp = s.optimized_max_rsrp, max_rsrq = s.optimized_max_rsrq, max_sinr = s.optimized_max_sinr,
                         mode_rsrp = s.optimized_mode_rsrp, mode_rsrq = s.optimized_mode_rsrq, mode_sinr = s.optimized_mode_sinr,
-                        best_operator_avg = s.optimized_best_operator_avg,
-                        best_operator_min = s.optimized_best_operator_min,
-                        best_operator_max = s.optimized_best_operator_max,
                     },
                     difference = new GridDifference
                     {
@@ -1665,43 +1555,6 @@ WHERE spo.tbl_project_id = @pid;";
                     .First().Key;
         }
 
-        private static string? BestOperatorBy(
-            List<PredPoint> pts,
-            Func<List<double>, double?> metricSelector)
-        {
-            if (pts == null || pts.Count == 0)
-                return null;
-
-            var ranked = pts
-                .Where(p => p.Rsrp.HasValue)
-                .GroupBy(p => NormalizeOperatorName(p.Operator))
-                .Select(g =>
-                {
-                    var values = g.Select(x => x.Rsrp!.Value).ToList();
-                    return new
-                    {
-                        Operator = g.Key,
-                        Value = metricSelector(values),
-                        Count = values.Count
-                    };
-                })
-                .Where(x => x.Value.HasValue)
-                .OrderByDescending(x => x.Value!.Value)
-                .ThenByDescending(x => x.Count)
-                .ThenBy(x => x.Operator, StringComparer.OrdinalIgnoreCase)
-                .FirstOrDefault();
-
-            return ranked?.Operator;
-        }
-
-        private static string NormalizeOperatorName(string? raw)
-        {
-            if (string.IsNullOrWhiteSpace(raw))
-                return "Unknown";
-
-            return raw.Trim();
-        }
-
         private static void AddParam(DbCommand cmd, string name, object? value)
         {
             var p = cmd.CreateParameter();
@@ -1729,7 +1582,6 @@ WHERE spo.tbl_project_id = @pid;";
             public double? Sinr { get; set; }
             public string? NodeBId { get; set; }
             public string? CellId { get; set; }
-            public string? Operator { get; set; }
             public string? SiteId { get; set; }
             public string? NodebIdCellId { get; set; }
         }
@@ -1798,9 +1650,6 @@ WHERE spo.tbl_project_id = @pid;";
             public double? mode_rsrp { get; set; }
             public double? mode_rsrq { get; set; }
             public double? mode_sinr { get; set; }
-            public string? best_operator_avg { get; set; }
-            public string? best_operator_min { get; set; }
-            public string? best_operator_max { get; set; }
         }
 
         public class GridDifference
