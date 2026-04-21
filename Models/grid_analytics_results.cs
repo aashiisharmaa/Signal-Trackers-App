@@ -63,6 +63,9 @@ namespace SignalTracker.Models
         [Column("baseline_mode_rsrp")]  public double? baseline_mode_rsrp { get; set; }
         [Column("baseline_mode_rsrq")]  public double? baseline_mode_rsrq { get; set; }
         [Column("baseline_mode_sinr")]  public double? baseline_mode_sinr { get; set; }
+        [Column("baseline_best_operator_avg")] public string? baseline_best_operator_avg { get; set; }
+        [Column("baseline_best_operator_min")] public string? baseline_best_operator_min { get; set; }
+        [Column("baseline_best_operator_max")] public string? baseline_best_operator_max { get; set; }
 
         // Optimized metrics
         [Column("optimized_avg_rsrp")]   public double? optimized_avg_rsrp { get; set; }
@@ -80,6 +83,9 @@ namespace SignalTracker.Models
         [Column("optimized_mode_rsrp")]  public double? optimized_mode_rsrp { get; set; }
         [Column("optimized_mode_rsrq")]  public double? optimized_mode_rsrq { get; set; }
         [Column("optimized_mode_sinr")]  public double? optimized_mode_sinr { get; set; }
+        [Column("optimized_best_operator_avg")] public string? optimized_best_operator_avg { get; set; }
+        [Column("optimized_best_operator_min")] public string? optimized_best_operator_min { get; set; }
+        [Column("optimized_best_operator_max")] public string? optimized_best_operator_max { get; set; }
 
         // Difference metrics (optimized - baseline)
         [Column("diff_avg_rsrp")]   public double? diff_avg_rsrp { get; set; }

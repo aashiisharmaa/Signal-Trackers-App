@@ -156,9 +156,9 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
             options.Cookie.Name = "st.session";
             options.Cookie.HttpOnly = true;
             options.Cookie.IsEssential = true;
-            // Electron renderer often runs from file:// in dev, which is cross-site to localhost.
-            // Use SameSite=None so session cookie can be sent on XHR/fetch requests.
-            options.Cookie.SameSite = SameSiteMode.None;
+            // For localhost HTTP development, SameSite=None without Secure gets rejected by browsers.
+            // Lax works for localhost:5173 -> localhost:5224 and keeps session cookies usable.
+            options.Cookie.SameSite = SameSiteMode.Lax;
             options.Cookie.SecurePolicy = CookieSecurePolicy.None;
         });
 
@@ -170,9 +170,9 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
             {
                 options.Cookie.Name = "st.auth";
                 options.Cookie.HttpOnly = true;
-                // Electron renderer often runs from file:// in dev, which is cross-site to localhost.
-                // Use SameSite=None so auth cookie can be sent on API calls.
-                options.Cookie.SameSite = SameSiteMode.None;
+                // For localhost HTTP development, SameSite=None without Secure gets rejected by browsers.
+                // Lax works for localhost:5173 -> localhost:5224 and keeps auth cookies usable.
+                options.Cookie.SameSite = SameSiteMode.Lax;
                 options.Cookie.SecurePolicy = CookieSecurePolicy.None;
                 options.ExpireTimeSpan = TimeSpan.FromMinutes(300);
                 options.SlidingExpiration = true;
@@ -213,7 +213,7 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
         // ----------------------------------------------------
         builder.Services.Configure<CookiePolicyOptions>(o =>
         {
-            o.MinimumSameSitePolicy = SameSiteMode.None;
+            o.MinimumSameSitePolicy = SameSiteMode.Lax;
             o.HttpOnly = HttpOnlyPolicy.Always;
             o.Secure = CookieSecurePolicy.None;
         });

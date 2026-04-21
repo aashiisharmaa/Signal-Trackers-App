@@ -6201,6 +6201,26 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     "sp.band",
                     "sp.pci");
 
+            var sourceColumns = await GetTableColumnSetAsync(conn, "site_prediction");
+            var optimizedColumns = requestedVersion == "combined"
+                ? await GetTableColumnSetAsync(conn, "site_prediction_optimized")
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            static string ResolveTxPowerExpr(string alias, HashSet<string> columns)
+            {
+                if (columns.Contains("tx_power"))
+                    return $"{alias}.`tx_power`";
+                if (columns.Contains("maximum_transmission_power_of_resource"))
+                    return $"{alias}.`maximum_transmission_power_of_resource`";
+                return "NULL";
+            }
+
+            var baselineTxPowerExpr = ResolveTxPowerExpr("sp", sourceColumns);
+            var optimizedTxPowerExpr = ResolveTxPowerExpr("spo", optimizedColumns);
+            var mergedTxPowerExpr = requestedVersion == "combined"
+                ? $"COALESCE({optimizedTxPowerExpr}, {baselineTxPowerExpr})"
+                : baselineTxPowerExpr;
+
             cmd.CommandText = requestedVersion == "combined"
                 ? $@"
                 SELECT
@@ -6226,7 +6246,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     COALESCE(spo.bw, sp.bw) AS bw,
                     COALESCE(spo.m_tilt, sp.m_tilt) AS m_tilt,
                     COALESCE(spo.e_tilt, sp.e_tilt) AS e_tilt,
-                    COALESCE(spo.tx_power, sp.tx_power) AS maximum_transmission_power_of_resource,
+                    {mergedTxPowerExpr} AS maximum_transmission_power_of_resource,
                     COALESCE(spo.real_transmit_power_of_resource, sp.real_transmit_power_of_resource) AS real_transmit_power_of_resource,
                     COALESCE(spo.reference_signal_power, sp.reference_signal_power) AS reference_signal_power,
                     COALESCE(spo.cellsize, sp.cellsize) AS cellsize,
@@ -6305,7 +6325,7 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
                     sp.bw,
                     sp.m_tilt,
                     sp.e_tilt,
-                    sp.tx_power AS maximum_transmission_power_of_resource,
+                    {mergedTxPowerExpr} AS maximum_transmission_power_of_resource,
                     sp.real_transmit_power_of_resource,
                     sp.reference_signal_power,
                     sp.cellsize,
