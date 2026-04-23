@@ -14,6 +14,26 @@ internal class Program
     private static void Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
+        var isDevelopment = builder.Environment.IsDevelopment();
+        var cookieSameSite = isDevelopment ? SameSiteMode.Lax : SameSiteMode.None;
+        var cookieSecurePolicy = isDevelopment ? CookieSecurePolicy.None : CookieSecurePolicy.Always;
+        var allowedExactOrigins = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "https://singnaltracker.netlify.app",
+            "https://stracer.vinfocom.co.in",
+            "https://s-traccceer.vinfocom.co.in"
+        };
+
+        static bool IsLoopbackElectronOrigin(Uri uri)
+        {
+            if (!uri.IsAbsoluteUri) return false;
+            if (!string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)) return false;
+
+            var host = uri.Host;
+            return string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(host, "127.0.0.1", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(host, "0.0.0.0", StringComparison.OrdinalIgnoreCase);
+        }
 
         // ----------------------------------------------------
         // CONTROLLERS & JSON
@@ -40,16 +60,10 @@ internal class Program
         {
             options.AddPolicy("AllowReactApp", policy =>
             {
-                policy.WithOrigins(
-                        "http://192.168.1.82:5173",
-                        "http://192.168.1.147:5173",
-                        "http://localhost:5173",
-                        "http://127.0.0.1:5173",
-                        "http://0.0.0.0:5173",
-                        "https://singnaltracker.netlify.app",
-                        "https://stracer.vinfocom.co.in"
-                    )
-                
+                policy.SetIsOriginAllowed(origin =>
+                    string.Equals(origin, "null", StringComparison.OrdinalIgnoreCase)
+                    || allowedExactOrigins.Contains(origin)
+                    || (Uri.TryCreate(origin, UriKind.Absolute, out var originUri) && IsLoopbackElectronOrigin(originUri)))
                     .AllowAnyHeader()
                     .AllowAnyMethod()
                     .AllowCredentials();
@@ -156,10 +170,8 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
             options.Cookie.Name = "st.session";
             options.Cookie.HttpOnly = true;
             options.Cookie.IsEssential = true;
-            // For localhost HTTP development, SameSite=None without Secure gets rejected by browsers.
-            // Lax works for localhost:5173 -> localhost:5224 and keeps session cookies usable.
-            options.Cookie.SameSite = SameSiteMode.Lax;
-            options.Cookie.SecurePolicy = CookieSecurePolicy.None;
+            options.Cookie.SameSite = cookieSameSite;
+            options.Cookie.SecurePolicy = cookieSecurePolicy;
         });
 
         // ----------------------------------------------------
@@ -170,10 +182,9 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
             {
                 options.Cookie.Name = "st.auth";
                 options.Cookie.HttpOnly = true;
-                // For localhost HTTP development, SameSite=None without Secure gets rejected by browsers.
-                // Lax works for localhost:5173 -> localhost:5224 and keeps auth cookies usable.
-                options.Cookie.SameSite = SameSiteMode.Lax;
-                options.Cookie.SecurePolicy = CookieSecurePolicy.None;
+                options.Cookie.SameSite = cookieSameSite;
+                options.Cookie.SecurePolicy = cookieSecurePolicy;
+                options.Cookie.IsEssential = true;
                 options.ExpireTimeSpan = TimeSpan.FromMinutes(300);
                 options.SlidingExpiration = true;
 
@@ -213,9 +224,16 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
         // ----------------------------------------------------
         builder.Services.Configure<CookiePolicyOptions>(o =>
         {
-            o.MinimumSameSitePolicy = SameSiteMode.Lax;
+            o.MinimumSameSitePolicy = cookieSameSite;
             o.HttpOnly = HttpOnlyPolicy.Always;
-            o.Secure = CookieSecurePolicy.None;
+            o.Secure = cookieSecurePolicy;
+        });
+
+        builder.Services.Configure<ForwardedHeadersOptions>(options =>
+        {
+            options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+            options.KnownNetworks.Clear();
+            options.KnownProxies.Clear();
         });
 
         // ----------------------------------------------------
@@ -241,13 +259,9 @@ Console.WriteLine("✅ Dynamic Database Provider configured");
             app.UseHsts();
         }
 
+        // Forwarded headers must be applied before HTTPS redirection when running behind a proxy.
+        app.UseForwardedHeaders();
         app.UseHttpsRedirection();
-
-        // Forwarded headers for reverse proxy
-        app.UseForwardedHeaders(new ForwardedHeadersOptions
-        {
-            ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
-        });
 
         app.UseStaticFiles();
         app.UseRouting();
