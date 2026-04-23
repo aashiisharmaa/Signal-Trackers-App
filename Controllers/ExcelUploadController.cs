@@ -98,6 +98,14 @@ namespace SignalTracker.Controllers
             return File(bytes, contentType, downloadName);
         }
 
+        // GET: /ExcelUpload/DownloadPythonRuntime
+        [HttpGet("DownloadPythonRuntime")]
+        [AllowAnonymous]
+        public IActionResult DownloadPythonRuntime()
+        {
+            return DownloadExcel(4, null);
+        }
+
         // GET: /ExcelUpload/GetUploadedExcelFiles
         [HttpGet("GetUploadedExcelFiles")]
         [AllowAnonymous]
