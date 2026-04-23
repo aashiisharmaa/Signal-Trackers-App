@@ -119,12 +119,18 @@ namespace SignalTracker.Controllers
                             baseline_min_rsrp DOUBLE, baseline_min_rsrq DOUBLE, baseline_min_sinr DOUBLE,
                             baseline_max_rsrp DOUBLE, baseline_max_rsrq DOUBLE, baseline_max_sinr DOUBLE,
                             baseline_mode_rsrp DOUBLE, baseline_mode_rsrq DOUBLE, baseline_mode_sinr DOUBLE,
+                            baseline_best_operator_avg VARCHAR(100),
+                            baseline_best_operator_min VARCHAR(100),
+                            baseline_best_operator_max VARCHAR(100),
 
                             optimized_avg_rsrp DOUBLE, optimized_avg_rsrq DOUBLE, optimized_avg_sinr DOUBLE,
                             optimized_median_rsrp DOUBLE, optimized_median_rsrq DOUBLE, optimized_median_sinr DOUBLE,
                             optimized_min_rsrp DOUBLE, optimized_min_rsrq DOUBLE, optimized_min_sinr DOUBLE,
                             optimized_max_rsrp DOUBLE, optimized_max_rsrq DOUBLE, optimized_max_sinr DOUBLE,
                             optimized_mode_rsrp DOUBLE, optimized_mode_rsrq DOUBLE, optimized_mode_sinr DOUBLE,
+                            optimized_best_operator_avg VARCHAR(100),
+                            optimized_best_operator_min VARCHAR(100),
+                            optimized_best_operator_max VARCHAR(100),
 
                             diff_avg_rsrp DOUBLE, diff_avg_rsrq DOUBLE, diff_avg_sinr DOUBLE,
                             diff_median_rsrp DOUBLE, diff_median_rsrq DOUBLE, diff_median_sinr DOUBLE,
@@ -149,6 +155,12 @@ namespace SignalTracker.Controllers
                         ["diff_min_rsrp"] = "DOUBLE",
                         ["diff_min_rsrq"] = "DOUBLE",
                         ["diff_min_sinr"] = "DOUBLE",
+                        ["baseline_best_operator_avg"] = "VARCHAR(100)",
+                        ["baseline_best_operator_min"] = "VARCHAR(100)",
+                        ["baseline_best_operator_max"] = "VARCHAR(100)",
+                        ["optimized_best_operator_avg"] = "VARCHAR(100)",
+                        ["optimized_best_operator_min"] = "VARCHAR(100)",
+                        ["optimized_best_operator_max"] = "VARCHAR(100)",
                     };
 
                     var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -381,6 +393,8 @@ namespace SignalTracker.Controllers
                         var bm = ComputeMetrics(bData);
                         var om = ComputeMetrics(oData);
                         var diff = ComputeDiff(bm, om);
+                        var baselineBestOperators = ComputeBestOperators(bData);
+                        var optimizedBestOperators = ComputeBestOperators(oData);
 
                         resultsList.Add(new grid_analytics_results
                         {
@@ -400,12 +414,18 @@ namespace SignalTracker.Controllers
                             baseline_min_rsrp = bm.min_rsrp, baseline_min_rsrq = bm.min_rsrq, baseline_min_sinr = bm.min_sinr,
                             baseline_max_rsrp = bm.max_rsrp, baseline_max_rsrq = bm.max_rsrq, baseline_max_sinr = bm.max_sinr,
                             baseline_mode_rsrp = bm.mode_rsrp, baseline_mode_rsrq = bm.mode_rsrq, baseline_mode_sinr = bm.mode_sinr,
+                            baseline_best_operator_avg = baselineBestOperators.best_operator_avg,
+                            baseline_best_operator_min = baselineBestOperators.best_operator_min,
+                            baseline_best_operator_max = baselineBestOperators.best_operator_max,
 
                             optimized_avg_rsrp = om.avg_rsrp, optimized_avg_rsrq = om.avg_rsrq, optimized_avg_sinr = om.avg_sinr,
                             optimized_median_rsrp = om.median_rsrp, optimized_median_rsrq = om.median_rsrq, optimized_median_sinr = om.median_sinr,
                             optimized_min_rsrp = om.min_rsrp, optimized_min_rsrq = om.min_rsrq, optimized_min_sinr = om.min_sinr,
                             optimized_max_rsrp = om.max_rsrp, optimized_max_rsrq = om.max_rsrq, optimized_max_sinr = om.max_sinr,
                             optimized_mode_rsrp = om.mode_rsrp, optimized_mode_rsrq = om.mode_rsrq, optimized_mode_sinr = om.mode_sinr,
+                            optimized_best_operator_avg = optimizedBestOperators.best_operator_avg,
+                            optimized_best_operator_min = optimizedBestOperators.best_operator_min,
+                            optimized_best_operator_max = optimizedBestOperators.best_operator_max,
 
                             diff_avg_rsrp = diff.diff_avg_rsrp, diff_avg_rsrq = diff.diff_avg_rsrq, diff_avg_sinr = diff.diff_avg_sinr,
                             diff_median_rsrp = diff.diff_median_rsrp, diff_median_rsrq = diff.diff_median_rsrq, diff_median_sinr = diff.diff_median_sinr,
@@ -1130,7 +1150,8 @@ SELECT
     node_b_id,
     cell_id,
     site_id,
-    nodeb_id_cell_id
+    nodeb_id_cell_id,
+    operator
 FROM `{table}`
 WHERE project_id = @pid";
             AddParam(cmd, "@pid", projectId);
@@ -1167,6 +1188,7 @@ WHERE project_id = @pid";
                     CellId = rdr.IsDBNull(6) ? null : rdr.GetValue(6)?.ToString(),
                     SiteId = rdr.IsDBNull(7) ? null : rdr.GetValue(7)?.ToString(),
                     NodebIdCellId = rdr.IsDBNull(8) ? null : rdr.GetValue(8)?.ToString(),
+                    Operator = rdr.IsDBNull(9) ? null : rdr.GetValue(9)?.ToString(),
                 });
             }
 
@@ -1465,6 +1487,46 @@ WHERE spo.tbl_project_id = @pid;";
             };
         }
 
+        private static BestOperatorMetrics ComputeBestOperators(List<PredPoint> pts)
+        {
+            if (pts == null || pts.Count == 0) return new BestOperatorMetrics();
+
+            var perOperator = pts
+                .Where(p => p.Rsrp.HasValue && !string.IsNullOrWhiteSpace(p.Operator))
+                .GroupBy(p => p.Operator!.Trim(), StringComparer.OrdinalIgnoreCase)
+                .Select(g =>
+                {
+                    var rsrpValues = g.Select(p => p.Rsrp!.Value).ToList();
+                    return new
+                    {
+                        Operator = g.Key,
+                        Avg = Avg(rsrpValues),
+                        Min = Min(rsrpValues),
+                        Max = Max(rsrpValues)
+                    };
+                })
+                .ToList();
+
+            return new BestOperatorMetrics
+            {
+                best_operator_avg = perOperator
+                    .Where(x => x.Avg.HasValue)
+                    .OrderByDescending(x => x.Avg!.Value)
+                    .ThenBy(x => x.Operator, StringComparer.OrdinalIgnoreCase)
+                    .FirstOrDefault()?.Operator,
+                best_operator_min = perOperator
+                    .Where(x => x.Min.HasValue)
+                    .OrderByDescending(x => x.Min!.Value)
+                    .ThenBy(x => x.Operator, StringComparer.OrdinalIgnoreCase)
+                    .FirstOrDefault()?.Operator,
+                best_operator_max = perOperator
+                    .Where(x => x.Max.HasValue)
+                    .OrderByDescending(x => x.Max!.Value)
+                    .ThenBy(x => x.Operator, StringComparer.OrdinalIgnoreCase)
+                    .FirstOrDefault()?.Operator,
+            };
+        }
+
         private static GridDifference ComputeDiff(GridMetrics b, GridMetrics o)
         {
             return new GridDifference
@@ -1499,6 +1561,9 @@ WHERE spo.tbl_project_id = @pid;";
                         min_rsrp = s.baseline_min_rsrp, min_rsrq = s.baseline_min_rsrq, min_sinr = s.baseline_min_sinr,
                         max_rsrp = s.baseline_max_rsrp, max_rsrq = s.baseline_max_rsrq, max_sinr = s.baseline_max_sinr,
                         mode_rsrp = s.baseline_mode_rsrp, mode_rsrq = s.baseline_mode_rsrq, mode_sinr = s.baseline_mode_sinr,
+                        best_operator_avg = s.baseline_best_operator_avg,
+                        best_operator_min = s.baseline_best_operator_min,
+                        best_operator_max = s.baseline_best_operator_max,
                     },
                     optimized = new GridMetrics
                     {
@@ -1508,6 +1573,9 @@ WHERE spo.tbl_project_id = @pid;";
                         min_rsrp = s.optimized_min_rsrp, min_rsrq = s.optimized_min_rsrq, min_sinr = s.optimized_min_sinr,
                         max_rsrp = s.optimized_max_rsrp, max_rsrq = s.optimized_max_rsrq, max_sinr = s.optimized_max_sinr,
                         mode_rsrp = s.optimized_mode_rsrp, mode_rsrq = s.optimized_mode_rsrq, mode_sinr = s.optimized_mode_sinr,
+                        best_operator_avg = s.optimized_best_operator_avg,
+                        best_operator_min = s.optimized_best_operator_min,
+                        best_operator_max = s.optimized_best_operator_max,
                     },
                     difference = new GridDifference
                     {
@@ -1585,6 +1653,7 @@ WHERE spo.tbl_project_id = @pid;";
             public string? CellId { get; set; }
             public string? SiteId { get; set; }
             public string? NodebIdCellId { get; set; }
+            public string? Operator { get; set; }
         }
 
         private class GridCell
@@ -1651,6 +1720,9 @@ WHERE spo.tbl_project_id = @pid;";
             public double? mode_rsrp { get; set; }
             public double? mode_rsrq { get; set; }
             public double? mode_sinr { get; set; }
+            public string? best_operator_avg { get; set; }
+            public string? best_operator_min { get; set; }
+            public string? best_operator_max { get; set; }
         }
 
         public class GridDifference
@@ -1670,6 +1742,13 @@ WHERE spo.tbl_project_id = @pid;";
             public double? diff_mode_rsrp { get; set; }
             public double? diff_mode_rsrq { get; set; }
             public double? diff_mode_sinr { get; set; }
+        }
+
+        private class BestOperatorMetrics
+        {
+            public string? best_operator_avg { get; set; }
+            public string? best_operator_min { get; set; }
+            public string? best_operator_max { get; set; }
         }
 
         public class CoverageOptimizationSummaryResponse
