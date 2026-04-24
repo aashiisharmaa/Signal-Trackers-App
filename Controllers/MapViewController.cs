@@ -1628,10 +1628,12 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
             await using var transaction = await db.Database.BeginTransactionAsync();
             try
             {
+                int? projectCompanyId = targetCompanyId > 0 ? targetCompanyId : null;
+
                 var newProj = new tbl_project
                 {
                     project_name   = model.ProjectName,
-                    company_id     = targetCompanyId, // <--- ADDED: Map the company ID
+                    company_id     = projectCompanyId,
                     provider       = model.Provider,
                     tech           = model.Tech,
                     band           = model.Band,
@@ -6102,7 +6104,6 @@ public async Task<IActionResult> UploadSitePredictionCsv([FromForm] UploadSitePr
             {
                 row["provider"] = provider;
                 row["operator_name"] = provider;
-                row["cluster"] = provider;
             }
             else if (!string.IsNullOrWhiteSpace(rawCluster))
             {
@@ -7322,6 +7323,7 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
     {
         // 2. Security: Resolve the Company ID from the authenticated user context
         int targetCompanyId = _userScope.GetTargetCompanyId(User, null);
+        int? projectCompanyId = targetCompanyId > 0 ? targetCompanyId : null;
 
         // 3. Initialize the Project Entity
         var newProject = new tbl_project
@@ -7329,7 +7331,7 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
             project_name = model.ProjectName,
             created_on = DateTime.UtcNow,
             status = 1,
-            company_id = targetCompanyId,
+            company_id = projectCompanyId,
             
             // Store the Session IDs as a comma-separated string
             ref_session_id = (model.SessionIds != null && model.SessionIds.Any())
