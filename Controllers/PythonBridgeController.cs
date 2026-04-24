@@ -176,5 +176,173 @@ namespace SignalTracker.Controllers
                 source = "signal-trackers"
             });
         }
+
+        [AllowAnonymous]
+        [HttpGet("GetProject")]
+        public async Task<IActionResult> GetProject([FromQuery] long projectId)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (projectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "projectId is required." });
+            }
+
+            var project = await _pythonBridgeService.GetProjectAsync(
+                projectId,
+                HttpContext.RequestAborted
+            );
+
+            if (project == null)
+            {
+                return NotFound(new { Status = 0, Message = "Project not found." });
+            }
+
+            return Ok(new { Status = 1, Data = project });
+        }
+
+        [AllowAnonymous]
+        [HttpGet("GetProjectRegions")]
+        public async Task<IActionResult> GetProjectRegions([FromQuery] long projectId)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (projectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "projectId is required." });
+            }
+
+            var rows = await _pythonBridgeService.GetProjectRegionsAsync(
+                projectId,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, Count = rows.Count, Data = rows });
+        }
+
+        [AllowAnonymous]
+        [HttpPost("GetReportNetworkLogs")]
+        public async Task<IActionResult> GetReportNetworkLogs([FromBody] SessionIdsPagedRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.SessionIds == null || request.SessionIds.Count == 0)
+            {
+                return BadRequest(new { Status = 0, Message = "SessionIds are required." });
+            }
+
+            var result = await _pythonBridgeService.GetReportNetworkLogsAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new
+            {
+                Status = 1,
+                Count = result.Rows.Count,
+                Limit = result.Limit,
+                Offset = result.Offset,
+                Data = result.Rows
+            });
+        }
+
+        [AllowAnonymous]
+        [HttpPost("GetSessions")]
+        public async Task<IActionResult> GetSessions([FromBody] SessionIdsPagedRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.SessionIds == null || request.SessionIds.Count == 0)
+            {
+                return BadRequest(new { Status = 0, Message = "SessionIds are required." });
+            }
+
+            var rows = await _pythonBridgeService.GetSessionsAsync(
+                request.SessionIds,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new { Status = 1, Count = rows.Count, Data = rows });
+        }
+
+        [AllowAnonymous]
+        [HttpGet("GetUser")]
+        public async Task<IActionResult> GetUser([FromQuery] int userId)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (userId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "userId is required." });
+            }
+
+            var user = await _pythonBridgeService.GetUserByIdAsync(
+                userId,
+                HttpContext.RequestAborted
+            );
+
+            if (user == null)
+            {
+                return NotFound(new { Status = 0, Message = "User not found." });
+            }
+
+            return Ok(new { Status = 1, Data = user });
+        }
+
+        [AllowAnonymous]
+        [HttpGet("GetUserThresholds")]
+        public async Task<IActionResult> GetUserThresholds([FromQuery] int userId)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (userId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "userId is required." });
+            }
+
+            var thresholds = await _pythonBridgeService.GetUserThresholdsAsync(
+                userId,
+                HttpContext.RequestAborted
+            );
+
+            if (thresholds == null)
+            {
+                return NotFound(new { Status = 0, Message = "Thresholds not found." });
+            }
+
+            return Ok(new { Status = 1, Data = thresholds });
+        }
+
+        [AllowAnonymous]
+        [HttpPost("UpdateProjectDownloadPath")]
+        public async Task<IActionResult> UpdateProjectDownloadPath([FromBody] ProjectDownloadPathUpdateRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ProjectId <= 0 || string.IsNullOrWhiteSpace(request.DownloadPath))
+            {
+                return BadRequest(new { Status = 0, Message = "ProjectId and DownloadPath are required." });
+            }
+
+            var updated = await _pythonBridgeService.UpdateProjectDownloadPathAsync(
+                request.ProjectId,
+                request.DownloadPath.Trim(),
+                HttpContext.RequestAborted
+            );
+
+            if (!updated)
+            {
+                return NotFound(new { Status = 0, Message = "Project not found." });
+            }
+
+            return Ok(new { Status = 1, Updated = true });
+        }
     }
 }
