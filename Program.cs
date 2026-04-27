@@ -77,6 +77,10 @@ internal class Program
         builder.Services.AddScoped<UserScopeService>();
         builder.Services.AddScoped<LicenseFeatureService>();
         builder.Services.AddScoped<PythonBridgeService>();
+        builder.Services.AddScoped<IOtpService, OtpService>();
+        builder.Services.AddScoped<IUserDeletionService, UserDeletionService>();
+        builder.Services.AddHttpClient<ISmsService, SmsService>();
+        builder.Services.AddHostedService<UserDeletionCleanupService>();
 
 
         builder.Services.AddHttpContextAccessor();

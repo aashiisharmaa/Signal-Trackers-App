@@ -39,6 +39,9 @@ protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
 
         // ======= Users & Auth =======
         public DbSet<tbl_user> tbl_user => Set<tbl_user>();
+        public DbSet<tbl_user_deletion_otp> tbl_user_deletion_otp => Set<tbl_user_deletion_otp>();
+        public DbSet<tbl_user_deletion_token> tbl_user_deletion_token => Set<tbl_user_deletion_token>();
+        public DbSet<tbl_user_deletion_audit> tbl_user_deletion_audit => Set<tbl_user_deletion_audit>();
         
 
        public DbSet<tbl_company> tbl_company { get; set; }
@@ -95,6 +98,32 @@ protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
             {
                 e.HasKey(x => x.id);
                 e.ToTable("tbl_user");
+                e.HasIndex(x => x.mobile).HasDatabaseName("ix_tbl_user_mobile");
+                e.HasIndex(x => new { x.is_deleted, x.deletion_requested_at }).HasDatabaseName("ix_tbl_user_deletion_due");
+            });
+
+            modelBuilder.Entity<tbl_user_deletion_otp>(e =>
+            {
+                e.HasKey(x => x.id);
+                e.ToTable("tbl_user_deletion_otp");
+                e.HasIndex(x => new { x.phone_number, x.created_at }).HasDatabaseName("ix_otp_phone_created");
+                e.HasIndex(x => new { x.user_id, x.consumed_at, x.expires_at }).HasDatabaseName("ix_otp_user_active");
+            });
+
+            modelBuilder.Entity<tbl_user_deletion_token>(e =>
+            {
+                e.HasKey(x => x.id);
+                e.ToTable("tbl_user_deletion_token");
+                e.HasIndex(x => x.token_hash).HasDatabaseName("ix_token_hash");
+                e.HasIndex(x => new { x.user_id, x.expires_at }).HasDatabaseName("ix_token_user");
+            });
+
+            modelBuilder.Entity<tbl_user_deletion_audit>(e =>
+            {
+                e.HasKey(x => x.id);
+                e.ToTable("tbl_user_deletion_audit");
+                e.HasIndex(x => new { x.user_id, x.created_at }).HasDatabaseName("ix_audit_user");
+                e.HasIndex(x => new { x.phone_number, x.created_at }).HasDatabaseName("ix_audit_phone");
             });
 
             // ADDED THIS FOR COMPANY API

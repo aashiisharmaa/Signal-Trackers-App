@@ -37,6 +37,47 @@ namespace SignalTracker.Models
 
         public string? device_id { get; set; }
         public string? gcm_id { get; set; }
+        public bool is_deleted { get; set; }
+        public DateTime? deletion_requested_at { get; set; }
+    }
+
+    public class tbl_user_deletion_otp
+    {
+        public long id { get; set; }
+        public int user_id { get; set; }
+        public string phone_number { get; set; } = string.Empty;
+        public string otp_hash { get; set; } = string.Empty;
+        public DateTime expires_at { get; set; }
+        public int attempt_count { get; set; }
+        public int max_attempts { get; set; } = 5;
+        public DateTime resend_available_at { get; set; }
+        public DateTime? consumed_at { get; set; }
+        public DateTime? blocked_at { get; set; }
+        public DateTime created_at { get; set; }
+    }
+
+    public class tbl_user_deletion_token
+    {
+        public long id { get; set; }
+        public int user_id { get; set; }
+        public string phone_number { get; set; } = string.Empty;
+        public string token_hash { get; set; } = string.Empty;
+        public DateTime expires_at { get; set; }
+        public DateTime? used_at { get; set; }
+        public DateTime created_at { get; set; }
+    }
+
+    public class tbl_user_deletion_audit
+    {
+        public long id { get; set; }
+        public int? user_id { get; set; }
+        public string? phone_number { get; set; }
+        public string event_type { get; set; } = string.Empty;
+        public string event_status { get; set; } = string.Empty;
+        public string? ip_address { get; set; }
+        public string? user_agent { get; set; }
+        public string? message { get; set; }
+        public DateTime created_at { get; set; }
     }
 
     public class tbl_user_login_audit_details
