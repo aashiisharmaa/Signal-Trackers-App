@@ -1140,7 +1140,43 @@ namespace SignalTracker.Controllers
         {
             var pts = new List<PredPoint>();
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = $@"
+            var sourceQuery = $@"
+SELECT
+    lat,
+    lon,
+    pred_rsrp,
+    pred_rsrq,
+    pred_sinr,
+    node_b_id,
+    cell_id,
+    site_id,
+    nodeb_id_cell_id,
+    operator,
+    created_at
+FROM `{table}`
+WHERE project_id = @pid";
+
+            if (string.Equals(table, "lte_prediction_optimised_results", StringComparison.OrdinalIgnoreCase))
+            {
+                cmd.CommandText = $@"
+WITH optimized_source AS (
+    {sourceQuery}
+),
+optimized_ranked AS (
+    SELECT
+        optimized_source.*,
+        ROW_NUMBER() OVER (
+            PARTITION BY
+                COALESCE(nodeb_id_cell_id, ''),
+                COALESCE(node_b_id, ''),
+                COALESCE(cell_id, ''),
+                COALESCE(site_id, ''),
+                lat,
+                lon
+            ORDER BY COALESCE(created_at, TIMESTAMP('1970-01-01 00:00:00')) DESC
+        ) AS rn
+    FROM optimized_source
+)
 SELECT
     lat,
     lon,
@@ -1152,8 +1188,13 @@ SELECT
     site_id,
     nodeb_id_cell_id,
     operator
-FROM `{table}`
-WHERE project_id = @pid";
+FROM optimized_ranked
+WHERE rn = 1";
+            }
+            else
+            {
+                cmd.CommandText = sourceQuery;
+            }
             AddParam(cmd, "@pid", projectId);
 
             await using var rdr = await cmd.ExecuteReaderAsync();

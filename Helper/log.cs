@@ -16,9 +16,9 @@ namespace SignalTracker.Helper
 
         public int write_exception_log(int userId, string sourceFile, string functionName, DateTime errorDate, Exception ex)
         {
-            var history = new exception_history();
             try
             {
+                var history = new exception_history();
                 string error = GetInnermostExceptionMessage(ex);
                 int lineNo = GetLineNumber(ex);
                 error += $" at line no {lineNo}";
@@ -36,18 +36,8 @@ namespace SignalTracker.Helper
             }
             catch (Exception innerEx)
             {
-                string fallbackError = GetInnermostExceptionMessage(innerEx);
-                int lineNo = GetLineNumber(innerEx);
-                fallbackError += $" at line no {lineNo}";
-
-                history.user_id = userId;
-                history.source_file = sourceFile;
-                history.page = functionName;
-                history.exception_date = errorDate;
-                history.exception = fallbackError;
-
-                _db.exception_history.Add(history);
-                _db.SaveChanges();
+                var fallbackError = GetInnermostExceptionMessage(innerEx);
+                Console.Error.WriteLine($"write_exception_log failed for {sourceFile}.{functionName}: {fallbackError}");
 
                 return 0; // Failure
             }

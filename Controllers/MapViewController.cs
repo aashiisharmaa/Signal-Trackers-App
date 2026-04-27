@@ -9205,7 +9205,7 @@ public async Task<IActionResult> GetSitePredictionOptimised(
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $@"
-WITH optimized_rows AS (
+WITH optimized_source AS (
     SELECT 
         o.id, o.project_id, o.job_id, o.lat, o.lon,
         o.pred_rsrp, o.pred_rsrq, o.pred_sinr,
@@ -9214,6 +9214,25 @@ WITH optimized_rows AS (
         {optimizedSectorSelect}
     FROM lte_prediction_optimised_results o
     WHERE {optimizedWhere}
+),
+optimized_rows AS (
+    SELECT *
+    FROM (
+        SELECT
+            os.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY
+                    COALESCE(os.node_b_cell_id, ''),
+                    COALESCE(os.node_b_id, ''),
+                    COALESCE(os.cell_id, ''),
+                    COALESCE(os.site_id, ''),
+                    os.lat,
+                    os.lon
+                ORDER BY os.id DESC
+            ) AS rn
+        FROM optimized_source os
+    ) ranked
+    WHERE ranked.rn = 1
 ),
 baseline_rows AS (
     SELECT 
