@@ -22,19 +22,6 @@ namespace SignalTracker.Services
         /// </summary>
         public int GetTargetCompanyId(ClaimsPrincipal user, int? requestedCompanyId)
         {
-            var countryCode = GetStringClaim(user, "country_code")
-                ?? _httpContextAccessor.HttpContext?.Session?.GetString("country_code");
-            bool isTwUser = string.Equals(countryCode, "TW", StringComparison.OrdinalIgnoreCase);
-
-            // TW deployment works as a single-tenant environment in current setup:
-            // use "all companies" scope to avoid excluding valid TW rows by company_id joins.
-            if (isTwUser)
-            {
-                if (requestedCompanyId.HasValue && requestedCompanyId.Value > 0)
-                    return requestedCompanyId.Value;
-                return 0;
-            }
-
             int userRole = GetIntClaim(user, "UserTypeId", "m_user_type_id")
                 ?? _httpContextAccessor.HttpContext?.Session?.GetInt32("UserType")
                 ?? 0;
@@ -64,11 +51,6 @@ namespace SignalTracker.Services
         }
         public bool IsSuperAdmin(ClaimsPrincipal user)
         {
-            var countryCode = GetStringClaim(user, "country_code")
-                ?? _httpContextAccessor.HttpContext?.Session?.GetString("country_code");
-            if (string.Equals(countryCode, "TW", StringComparison.OrdinalIgnoreCase))
-                return true;
-
             int role = GetIntClaim(user, "UserTypeId", "m_user_type_id")
                 ?? _httpContextAccessor.HttpContext?.Session?.GetInt32("UserType")
                 ?? 0;
