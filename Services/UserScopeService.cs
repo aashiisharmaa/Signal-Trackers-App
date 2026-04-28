@@ -58,6 +58,14 @@ namespace SignalTracker.Services
             return role == ROLE_SUPER_ADMIN;
         }
 
+        public int GetCurrentUserId(ClaimsPrincipal user)
+        {
+            return GetIntClaim(user, "UserId")
+                ?? _httpContextAccessor.HttpContext?.Session?.GetInt32("UserID")
+                ?? ParseInt(_httpContextAccessor.HttpContext?.Session?.GetString("UserID"))
+                ?? 0;
+        }
+
         internal int GetCompanyId(ClaimsPrincipal user)
         {
             throw new NotImplementedException();

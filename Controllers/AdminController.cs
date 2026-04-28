@@ -2772,8 +2772,10 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
     // 1. SMART SECURITY: RESOLVE COMPANY ID
     // =========================================================
     int targetCompanyId = GetTargetCompanyId(company_id);
+    int currentUserId = _userScope.GetCurrentUserId(User);
+    bool useUserScope = !_userScope.IsSuperAdmin(User) && targetCompanyId == 0 && currentUserId > 0;
 
-    if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
+    if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
     {
         return Unauthorized(new
         {
@@ -2782,7 +2784,7 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
         });
     }
 
-    var cacheKey = $"sessions:list:{targetCompanyId}";
+    var cacheKey = $"sessions:list:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
     var cached = await TryGetCachedObjectAsync<List<object>>(cacheKey);
     if (cached != null)
     {
@@ -2802,7 +2804,9 @@ public async Task<IActionResult> GetSessions([FromQuery] int? company_id = null)
         var sessions = await (
             from s in db.tbl_session.AsNoTracking()
             join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
-            where (targetCompanyId == 0 || u.company_id == targetCompanyId) // ?? SECURITY FILTER
+            where useUserScope
+                ? s.user_id == currentUserId
+                : (targetCompanyId == 0 || u.company_id == targetCompanyId)
             orderby s.start_time descending
             select new
             {
@@ -3896,9 +3900,11 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
     // =========================================================
     // Determine the target company based on user role and input.
     int targetCompanyId = GetTargetCompanyId(company_id);
+    int currentUserId = _userScope.GetCurrentUserId(User);
+    bool useUserScope = !_userScope.IsSuperAdmin(User) && targetCompanyId == 0 && currentUserId > 0;
 
     // If no valid company is found and user is NOT a Super Admin, deny access.
-    if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
+    if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
     {
         return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
     }
@@ -3907,7 +3913,7 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
     // 2. DEFINE CACHE KEY (Include Company ID)
     // =========================================================
     // Cache must be isolated per company so Company A doesn't see Company B's totals.
-    string cacheKey = $"DashboardTotalsV2:{targetCompanyId}";
+    string cacheKey = $"DashboardTotalsV2:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
 
     // =========================================================
     // 3. EXECUTE SAFE QUERY HANDLER
@@ -3924,7 +3930,9 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
         var totalSessions = await (
             from s in db.tbl_session.AsNoTracking()
             join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
-            where (targetCompanyId == 0 || u.company_id == targetCompanyId)
+            where useUserScope
+                ? s.user_id == currentUserId
+                : (targetCompanyId == 0 || u.company_id == targetCompanyId)
             select s
         ).CountAsync();
 
@@ -3932,7 +3940,9 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
         var totalOnlineSessions = await (
             from s in db.tbl_session.AsNoTracking()
             join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
-            where (targetCompanyId == 0 || u.company_id == targetCompanyId)
+            where (useUserScope
+                   ? s.user_id == currentUserId
+                   : (targetCompanyId == 0 || u.company_id == targetCompanyId))
                && s.start_time != null 
                && s.end_time == null 
                && s.start_time.Value.Date == today
@@ -3945,13 +3955,17 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
             from n in db.tbl_network_log.AsNoTracking()
             join s in db.tbl_session.AsNoTracking() on n.session_id equals s.id
             join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
-            where (targetCompanyId == 0 || u.company_id == targetCompanyId)
+            where useUserScope
+                ? s.user_id == currentUserId
+                : (targetCompanyId == 0 || u.company_id == targetCompanyId)
             select n
         ).CountAsync();
 
         // --- 4. Total Users (Filtered by Company) ---
         var totalUsers = await db.tbl_user.AsNoTracking()
-            .Where(u => targetCompanyId == 0 || u.company_id == targetCompanyId)
+            .Where(u => useUserScope
+                ? u.id == currentUserId
+                : (targetCompanyId == 0 || u.company_id == targetCompanyId))
             .CountAsync();
 
         return new

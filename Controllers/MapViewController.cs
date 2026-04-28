@@ -3985,13 +3985,16 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
         // =========================================================
         bool isSuperAdmin = _userScope.IsSuperAdmin(User);
         int targetCompanyId = GetTargetCompanyId(company_id);
+        int currentUserId = _userScope.GetCurrentUserId(User);
+        bool useUserScope = !isSuperAdmin && targetCompanyId == 0 && currentUserId > 0;
 
-        if (!isSuperAdmin && targetCompanyId == 0)
+        if (!isSuperAdmin && targetCompanyId == 0 && !useUserScope)
             return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
 
         var cacheKey = BuildMapViewCacheKey(
             "neighbour-logs-date-range",
             targetCompanyId,
+            useUserScope ? currentUserId : 0,
             filters.StartDate,
             filters.StartTime,
             filters.EndDate,
@@ -4027,7 +4030,7 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
         // ==============================
         IQueryable<tbl_network_log_neighbour> baseQuery;
 
-        if (targetCompanyId == 0)
+        if (targetCompanyId == 0 && !useUserScope)
         {
             // PATH A: Super Admin (Global) - Direct Table Access
             baseQuery = db.tbl_network_log_neighbour
@@ -4036,11 +4039,12 @@ public async Task<IActionResult> GetNeighbourLogsByDateRange(
         }
         else
         {
-            // PATH B: Company Admin - Secure Join
+            // PATH B: Company/User scoped - Secure Join
             baseQuery = from n in db.tbl_network_log_neighbour.AsNoTracking()
                         join s in db.tbl_session.AsNoTracking() on n.session_id equals s.id
                         join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
-                        where u.company_id == targetCompanyId && n.timestamp != null
+                        where (useUserScope ? s.user_id == currentUserId : u.company_id == targetCompanyId)
+                              && n.timestamp != null
                         select n;
         }
 
@@ -4256,8 +4260,10 @@ public async Task<IActionResult> GetLogsByDateRange(
         // =========================================================
         bool isSuperAdmin = _userScope.IsSuperAdmin(User);
         int targetCompanyId = GetTargetCompanyId(company_id);
+        int currentUserId = _userScope.GetCurrentUserId(User);
+        bool useUserScope = !isSuperAdmin && targetCompanyId == 0 && currentUserId > 0;
 
-        if (!isSuperAdmin && targetCompanyId == 0)
+        if (!isSuperAdmin && targetCompanyId == 0 && !useUserScope)
             return Unauthorized(new { Status = 0, Message = "Unauthorized. Unable to resolve Company Context." });
 
         // =========================================================
@@ -4272,7 +4278,7 @@ public async Task<IActionResult> GetLogsByDateRange(
         if (filters.EndDate.HasValue)
             endDateTime = filters.EndDate.Value.Date.Add(filters.EndTime ?? new TimeSpan(23, 59, 59));
 
-        string cacheKey = BuildDateRangeCacheKey(filters, targetCompanyId);
+        string cacheKey = BuildDateRangeCacheKey(filters, targetCompanyId, useUserScope ? currentUserId : 0);
 
         // =========================================================
         // 3. TRY REDIS CACHE
@@ -4297,7 +4303,7 @@ public async Task<IActionResult> GetLogsByDateRange(
         // =========================================================
         IQueryable<tbl_network_log> query;
 
-        if (targetCompanyId == 0)
+        if (targetCompanyId == 0 && !useUserScope)
         {
             // PATH A: SUPER ADMIN (Global View) - Fast Path (No Joins)
             // Fastest possible query directly on the log table
@@ -4305,12 +4311,11 @@ public async Task<IActionResult> GetLogsByDateRange(
         }
         else
         {
-            // PATH B: COMPANY ADMIN (Filtered View) - Secure Path (Joins)
-            // Securely filters data by joining Session -> User
+            // PATH B: Company/User scoped - Secure Path (Joins)
             query = from l in db.tbl_network_log.AsNoTracking()
                     join s in db.tbl_session.AsNoTracking() on l.session_id equals s.id
                     join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
-                    where u.company_id == targetCompanyId
+                    where useUserScope ? s.user_id == currentUserId : u.company_id == targetCompanyId
                     select l;
         }
 
@@ -4466,7 +4471,7 @@ public async Task<IActionResult> GetLogsByDateRange(
     return _userScope.GetTargetCompanyId(User, company_id);
 }
 
-        private string BuildDateRangeCacheKey(LogFilterModel filters, int companyId)
+        private string BuildDateRangeCacheKey(LogFilterModel filters, int companyId, int userId = 0)
 {
     string provider = string.IsNullOrWhiteSpace(filters.Provider)
         ? "all"
@@ -4476,7 +4481,7 @@ public async Task<IActionResult> GetLogsByDateRange(
     string toDate = filters.EndDate?.ToString("yyyyMMdd") ?? "null";
     string polygonId = filters.PolygonId?.ToString() ?? "null";
 
-    return $"daterangelog:company:{companyId}:{provider}:{fromDate}:{toDate}:{polygonId}";
+    return $"daterangelog:company:{companyId}:user:{userId}:{provider}:{fromDate}:{toDate}:{polygonId}";
 }
 /// <summary>
 /// 
@@ -8179,9 +8184,12 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
 
         // 1. Resolve company securely (same pattern)
         int targetCompanyId = GetTargetCompanyId(company_id);
+        bool isSuperAdmin = _userScope.IsSuperAdmin(User);
+        int currentUserId = _userScope.GetCurrentUserId(User);
+        bool useUserScope = !isSuperAdmin && targetCompanyId == 0 && currentUserId > 0;
 
         // Super admin check
-        if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
+        if (targetCompanyId == 0 && !isSuperAdmin && !useUserScope)
         {
             return Unauthorized(new
             {
@@ -8190,7 +8198,7 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
             });
         }
 
-        var cacheKey = BuildMapViewCacheKey("projects", targetCompanyId);
+        var cacheKey = BuildMapViewCacheKey("projects", targetCompanyId, useUserScope ? currentUserId : 0);
         var cached = await TryGetMapViewCacheAsync<object>(cacheKey);
         if (cached != null)
             return Json(cached);
@@ -8241,10 +8249,16 @@ public async Task<IActionResult> GetProjects([FromQuery] int? company_id = null)
                     ) mr
                       ON mr.tbl_project_id = p.id
                     WHERE (p.status IS NULL OR p.status <> 0)
-                      AND (@cid = 0 OR p.company_id = @cid)
+                      AND (
+                            @global = 1
+                            OR p.company_id = @cid
+                            OR (@uid > 0 AND p.created_by_user_id = @uid)
+                          )
                     ORDER BY p.id DESC;";
 
+                cmd.Parameters.AddWithValue("@global", isSuperAdmin && targetCompanyId == 0 ? 1 : 0);
                 cmd.Parameters.AddWithValue("@cid", targetCompanyId);
+                cmd.Parameters.AddWithValue("@uid", useUserScope ? currentUserId : 0);
 
                 using (var reader = await cmd.ExecuteReaderAsync())
                 {
