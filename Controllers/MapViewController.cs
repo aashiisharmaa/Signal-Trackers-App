@@ -1111,12 +1111,21 @@ public class ProjectPolygonItem
                 AddParam(cmd, "@area", (object?)model.Area ?? DBNull.Value);
 
                 await cmd.ExecuteNonQueryAsync();
+
+                await using var cmdId = conn.CreateCommand();
+                cmdId.CommandText = "SELECT LAST_INSERT_ID();";
+                var insertedIdRaw = await cmdId.ExecuteScalarAsync();
+                var insertedId = insertedIdRaw != null && insertedIdRaw != DBNull.Value
+                    ? Convert.ToInt32(insertedIdRaw)
+                    : 0;
                 await InvalidateMapViewCachesAsync();
 
                 message.Status = 1;
                 message.Message = "Polygon saved successfully.";
                 message.Data = new
                 {
+                    polygonId = insertedId,
+                    id = insertedId,
                     saved = true,
                     area = model.Area,
                     sessionCsv = string.IsNullOrWhiteSpace(sessionStr) ? null : sessionStr,
