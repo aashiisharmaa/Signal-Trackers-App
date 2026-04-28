@@ -101,6 +101,58 @@ namespace SignalTracker.Services
             return (limit, offset, rows);
         }
 
+        public async Task<(int Limit, int Offset, List<Dictionary<string, object?>> Rows)> GetLteTiltBaselineResultsAsync(
+            LteTiltBaselineRowsRequest request,
+            CancellationToken cancellationToken = default
+        )
+        {
+            if (request.ProjectId <= 0)
+            {
+                throw new ArgumentException("ProjectId is required.");
+            }
+
+            var limit = Math.Clamp(request.Limit, 1, 50000);
+            var offset = Math.Max(request.Offset, 0);
+            var operatorFilter = request.Operator?.Trim();
+            var hasOperatorFilter = !string.IsNullOrWhiteSpace(operatorFilter)
+                && !string.Equals(operatorFilter, "all", StringComparison.OrdinalIgnoreCase);
+
+            var conn = _db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+            {
+                await conn.OpenAsync(cancellationToken);
+            }
+
+            await using var command = conn.CreateCommand();
+            command.CommandText = $@"
+                SELECT
+                    node_b_id,
+                    cell_id,
+                    operator,
+                    pred_rsrp,
+                    pred_rsrq,
+                    pred_sinr,
+                    lat,
+                    lon
+                FROM lte_prediction_baseline_results
+                WHERE project_id = @pid
+                {(hasOperatorFilter ? "AND operator = @operator" : string.Empty)}
+                ORDER BY id
+                LIMIT @lim OFFSET @off;";
+
+            PythonBridgeDbTool.AddParam(command, "@pid", request.ProjectId);
+            if (hasOperatorFilter)
+            {
+                PythonBridgeDbTool.AddParam(command, "@operator", operatorFilter!);
+            }
+            PythonBridgeDbTool.AddParam(command, "@lim", limit);
+            PythonBridgeDbTool.AddParam(command, "@off", offset);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var rows = await PythonBridgeDbTool.ReadRowsAsync(reader, cancellationToken);
+            return (limit, offset, rows);
+        }
+
         public async Task<int> SavePredictionDataAsync(
             PredictionDataBulkRequest request,
             CancellationToken cancellationToken = default

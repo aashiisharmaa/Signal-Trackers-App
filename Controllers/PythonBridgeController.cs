@@ -70,6 +70,33 @@ namespace SignalTracker.Controllers
         }
 
         [AllowAnonymous]
+        [HttpGet("GetLteTiltBaselineResults")]
+        public async Task<IActionResult> GetLteTiltBaselineResults([FromQuery] LteTiltBaselineRowsRequest request)
+        {
+            var authResult = EnsureAuthorized();
+            if (authResult is not null) return authResult;
+
+            if (request == null || request.ProjectId <= 0)
+            {
+                return BadRequest(new { Status = 0, Message = "ProjectId is required." });
+            }
+
+            var result = await _pythonBridgeService.GetLteTiltBaselineResultsAsync(
+                request,
+                HttpContext.RequestAborted
+            );
+
+            return Ok(new
+            {
+                Status = 1,
+                Count = result.Rows.Count,
+                Limit = result.Limit,
+                Offset = result.Offset,
+                Data = result.Rows
+            });
+        }
+
+        [AllowAnonymous]
         [HttpPost("SavePredictionData")]
         public async Task<IActionResult> SavePredictionData([FromBody] PredictionDataBulkRequest request)
         {
