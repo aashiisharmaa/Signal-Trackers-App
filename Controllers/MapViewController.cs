@@ -1599,6 +1599,8 @@ public class AvailablePolygonsResponse
             public List<int>? PolygonIds { get; set; }
             public List<int>? SessionIds { get; set; }
             public string? GridSize { get; set; }
+            public int? company_id { get; set; }
+            public int? CompanyId { get; set; }
         }
 
         [HttpPost, Route("CreateProjectWithPolygons")]
@@ -1611,7 +1613,8 @@ public async Task<JsonResult> CreateProjectWithPolygons([FromBody] CreateProject
     int targetCompanyId = 0;
     try 
     { 
-        targetCompanyId = _userScope.GetTargetCompanyId(User, null); 
+        int? requestedCompanyId = model?.company_id ?? model?.CompanyId;
+        targetCompanyId = _userScope.GetTargetCompanyId(User, requestedCompanyId); 
     } 
     catch 
     { 
@@ -7322,8 +7325,39 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
     try
     {
         // 2. Security: Resolve the Company ID from the authenticated user context
-        int targetCompanyId = _userScope.GetTargetCompanyId(User, null);
+        int? requestedCompanyId = model?.company_id ?? model?.CompanyId;
+        int targetCompanyId = _userScope.GetTargetCompanyId(User, requestedCompanyId);
         int? projectCompanyId = targetCompanyId > 0 ? targetCompanyId : null;
+
+        if (!projectCompanyId.HasValue && model.SessionIds != null && model.SessionIds.Any())
+        {
+            var inferredCompanyIds = await (
+                from s in db.tbl_session
+                join u in db.tbl_user on s.user_id equals u.id
+                where s.id.HasValue
+                      && model.SessionIds.Contains(s.id.Value)
+                      && u.company_id.HasValue
+                      && u.company_id.Value > 0
+                select (int)u.company_id.Value
+            )
+            .Distinct()
+            .Take(2)
+            .ToListAsync();
+
+            var inferredCompanyCount = inferredCompanyIds.Count();
+            if (inferredCompanyCount == 1)
+            {
+                projectCompanyId = inferredCompanyIds[0];
+            }
+            else if (inferredCompanyCount > 1)
+            {
+                return BadRequest(new
+                {
+                    Status = 0,
+                    Message = "Selected sessions belong to multiple companies. Please choose sessions from a single company."
+                });
+            }
+        }
 
         // 3. Initialize the Project Entity
         var newProject = new tbl_project
@@ -7362,7 +7396,13 @@ public async Task<IActionResult> CreateSimpleProject([FromBody] CreateProjectMod
     }
     catch (Exception ex)
     {
-        return StatusCode(500, new { Status = 0, Message = "Internal Server Error: " + ex.Message });
+        string details = ex.InnerException?.Message ?? ex.Message;
+        return StatusCode(500, new
+        {
+            Status = 0,
+            Message = "Internal Server Error while creating project.",
+            Details = details
+        });
     }
 
 
@@ -9205,7 +9245,7 @@ public async Task<IActionResult> GetSitePredictionOptimised(
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $@"
-WITH optimized_rows AS (
+WITH optimized_source AS (
     SELECT 
         o.id, o.project_id, o.job_id, o.lat, o.lon,
         o.pred_rsrp, o.pred_rsrq, o.pred_sinr,
@@ -9214,6 +9254,25 @@ WITH optimized_rows AS (
         {optimizedSectorSelect}
     FROM lte_prediction_optimised_results o
     WHERE {optimizedWhere}
+),
+optimized_rows AS (
+    SELECT *
+    FROM (
+        SELECT
+            os.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY
+                    COALESCE(os.node_b_cell_id, ''),
+                    COALESCE(os.node_b_id, ''),
+                    COALESCE(os.cell_id, ''),
+                    COALESCE(os.site_id, ''),
+                    os.lat,
+                    os.lon
+                ORDER BY os.id DESC
+            ) AS rn
+        FROM optimized_source os
+    ) ranked
+    WHERE ranked.rn = 1
 ),
 baseline_rows AS (
     SELECT 
