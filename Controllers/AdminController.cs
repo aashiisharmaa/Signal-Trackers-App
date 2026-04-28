@@ -37,9 +37,19 @@ namespace SignalTracker.Controllers
         private string? m_alpha_long;
 
 private int GetTargetCompanyId(int? explicitCompanyId)
-    {
+{
         return _userScope.GetTargetCompanyId(User, explicitCompanyId);
-    }
+}
+
+private int GetCurrentUserId()
+{
+        return _userScope.GetCurrentUserId(User);
+}
+
+private bool UseCurrentUserScope(int targetCompanyId, int currentUserId)
+{
+        return !_userScope.IsSuperAdmin(User) && targetCompanyId == 0 && currentUserId > 0;
+}
 
         // RSRP Threshold for Good/Bad classification in Indoor/Polygon views
         private const double RsrpThreshold = -90.0;
@@ -1565,7 +1575,9 @@ public async Task<IActionResult> GetOperatorCoverageRanking(
     try
     {
         int targetCompanyId = GetTargetCompanyId(company_id);
-        if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
+        int currentUserId = GetCurrentUserId();
+        bool useUserScope = UseCurrentUserScope(targetCompanyId, currentUserId);
+        if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
         {
             return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
         }
@@ -1579,7 +1591,7 @@ public async Task<IActionResult> GetOperatorCoverageRanking(
             effectiveTo = tmp;
         }
 
-        string cacheKey = $"opcoverage:{targetCompanyId}:{min}:{max}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}";
+        string cacheKey = $"opcoverage:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{min}:{max}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}";
         if (_redis != null && _redis.IsConnected)
         {
             var cached = await _redis.GetObjectAsync<List<OperatorQualityItem>>(cacheKey);
@@ -1592,7 +1604,7 @@ public async Task<IActionResult> GetOperatorCoverageRanking(
         var toExclusive = effectiveTo.AddDays(1);
         var result = new List<OperatorQualityItem>();
 
-        if (targetCompanyId == 0)
+        if (targetCompanyId == 0 && !useUserScope)
         {
             result = await db.tbl_network_log
                 .AsNoTracking()
@@ -1635,7 +1647,7 @@ public async Task<IActionResult> GetOperatorCoverageRanking(
                     FROM tbl_user u
                     STRAIGHT_JOIN tbl_session s ON s.user_id = u.id
                     STRAIGHT_JOIN tbl_network_log n ON n.session_id = s.id
-                    WHERE u.company_id = @companyId
+                    WHERE (__SCOPE_CLAUSE__)
                       AND n.rsrp IS NOT NULL
                       AND n.rsrp >= @min
                       AND n.rsrp <= @max
@@ -1645,9 +1657,19 @@ public async Task<IActionResult> GetOperatorCoverageRanking(
                       AND n.m_alpha_long <> ''
                     GROUP BY n.m_alpha_long
                     ORDER BY count DESC;";
+                cmd.CommandText = cmd.CommandText.Replace(
+                    "__SCOPE_CLAUSE__",
+                    useUserScope ? "s.user_id = @userId" : "u.company_id = @companyId");
                 cmd.CommandTimeout = 90;
 
-                var pCompany = cmd.CreateParameter(); pCompany.ParameterName = "@companyId"; pCompany.Value = targetCompanyId; cmd.Parameters.Add(pCompany);
+                if (useUserScope)
+                {
+                    var pUser = cmd.CreateParameter(); pUser.ParameterName = "@userId"; pUser.Value = currentUserId; cmd.Parameters.Add(pUser);
+                }
+                else
+                {
+                    var pCompany = cmd.CreateParameter(); pCompany.ParameterName = "@companyId"; pCompany.Value = targetCompanyId; cmd.Parameters.Add(pCompany);
+                }
                 var pMin = cmd.CreateParameter(); pMin.ParameterName = "@min"; pMin.Value = min; cmd.Parameters.Add(pMin);
                 var pMax = cmd.CreateParameter(); pMax.ParameterName = "@max"; pMax.Value = max; cmd.Parameters.Add(pMax);
                 var pFrom = cmd.CreateParameter(); pFrom.ParameterName = "@fromDate"; pFrom.Value = effectiveFrom; cmd.Parameters.Add(pFrom);
@@ -1711,8 +1733,10 @@ public async Task<IActionResult> GetOperatorQualityRanking(
     {
         // 1. RESOLVE COMPANY ID
         int targetCompanyId = GetTargetCompanyId(company_id);
+        int currentUserId = GetCurrentUserId();
+        bool useUserScope = UseCurrentUserScope(targetCompanyId, currentUserId);
 
-        if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
+        if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
         {
             return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
         }
@@ -1727,7 +1751,7 @@ public async Task<IActionResult> GetOperatorQualityRanking(
         }
 
         // 2. CACHE KEY
-        string cacheKey = $"opquality:{targetCompanyId}:{min}:{max}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}";
+        string cacheKey = $"opquality:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{min}:{max}:{effectiveFrom:yyyyMMdd}:{effectiveTo:yyyyMMdd}";
 
         // 3. TRY REDIS (Standard Cache Logic)
         if (_redis != null && _redis.IsConnected)
@@ -1751,7 +1775,7 @@ public async Task<IActionResult> GetOperatorQualityRanking(
         // 4A. FAST PATH: SUPER ADMIN (ALL DATA)
         // If CompanyID is 0, we DO NOT need to join Session or User tables.
         // We just aggregate the Log table directly. This removes massive overhead.
-        if (targetCompanyId == 0)
+        if (targetCompanyId == 0 && !useUserScope)
         {
             result = await db.tbl_network_log
                 .AsNoTracking()
@@ -1787,7 +1811,7 @@ public async Task<IActionResult> GetOperatorQualityRanking(
                 FROM tbl_session s
                 JOIN tbl_user u ON s.user_id = u.id
                 JOIN tbl_network_log n ON n.session_id = s.id
-                WHERE u.company_id = {0} 
+                WHERE __SCOPE_CLAUSE__
                   AND n.rsrq >= {1} 
                   AND n.rsrq <= {2}
                   AND n.timestamp >= {3}
@@ -1811,13 +1835,20 @@ public async Task<IActionResult> GetOperatorQualityRanking(
                 // Replace parameters manually or use AddParameter to be safe against injection (though inputs are typed here)
                 // Using numbered parameters for raw format is safer:
                 cmd.CommandText = sql
-                    .Replace("{0}", "@p0")
                     .Replace("{1}", "@p1")
                     .Replace("{2}", "@p2")
                     .Replace("{3}", "@p3")
-                    .Replace("{4}", "@p4");
+                    .Replace("{4}", "@p4")
+                    .Replace("__SCOPE_CLAUSE__", useUserScope ? "s.user_id = @userId" : "u.company_id = @p0");
 
-                var p0 = cmd.CreateParameter(); p0.ParameterName = "@p0"; p0.Value = targetCompanyId; cmd.Parameters.Add(p0);
+                if (useUserScope)
+                {
+                    var pUser = cmd.CreateParameter(); pUser.ParameterName = "@userId"; pUser.Value = currentUserId; cmd.Parameters.Add(pUser);
+                }
+                else
+                {
+                    var p0 = cmd.CreateParameter(); p0.ParameterName = "@p0"; p0.Value = targetCompanyId; cmd.Parameters.Add(p0);
+                }
                 var p1 = cmd.CreateParameter(); p1.ParameterName = "@p1"; p1.Value = min; cmd.Parameters.Add(p1);
                 var p2 = cmd.CreateParameter(); p2.ParameterName = "@p2"; p2.Value = max; cmd.Parameters.Add(p2);
                 var p3 = cmd.CreateParameter(); p3.ParameterName = "@p3"; p3.Value = effectiveFrom; cmd.Parameters.Add(p3);
@@ -3989,7 +4020,9 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
             // 1. SMART SECURITY: RESOLVE COMPANY ID
             // =========================================================
           int targetCompanyId = GetTargetCompanyId(company_id);
-    if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User)) 
+    int currentUserId = GetCurrentUserId();
+    bool useUserScope = UseCurrentUserScope(targetCompanyId, currentUserId);
+    if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope) 
 {
     return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
 }
@@ -3999,7 +4032,7 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
             var normalizedNetwork = string.IsNullOrWhiteSpace(network) ? null : network.Trim().ToLowerInvariant();
 
             // Include CompanyID in cache key for isolation
-            var cacheKey = $"NetDur:{targetCompanyId}:{fromDate:yyyyMMdd}:{toDate:yyyyMMdd}:{normalizedProvider ?? "ALL"}:{normalizedNetwork ?? "ALL"}";
+            var cacheKey = $"NetDur:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{fromDate:yyyyMMdd}:{toDate:yyyyMMdd}:{normalizedProvider ?? "ALL"}:{normalizedNetwork ?? "ALL"}";
 
             var result = new List<object>();
             var conn = db.Database.GetDbConnection();
@@ -4050,7 +4083,7 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
                     FROM tbl_network_log l
                     JOIN tbl_session s ON l.session_id = s.id
                     JOIN tbl_user u ON s.user_id = u.id
-                    WHERE (@companyId = 0 OR u.company_id = @companyId)
+                    WHERE (@global = 1 OR u.company_id = @companyId OR (@userId > 0 AND s.user_id = @userId))
                       AND (@fromDate IS NULL OR l.timestamp >= @fromDate)
                       AND (@toDate   IS NULL OR l.timestamp <= @toDate)
                       AND (@provider IS NULL OR LOWER(l.m_alpha_long) LIKE CONCAT('%', @provider, '%'))
@@ -4065,7 +4098,9 @@ public async Task<IActionResult> TotalsV2([FromQuery] int? company_id = null)
                 cmd.CommandText = sql;
                 cmd.CommandTimeout = 300;
 
+                Add(cmd, "@global", _userScope.IsSuperAdmin(User) && targetCompanyId == 0 ? 1 : 0);
                 Add(cmd, "@companyId", targetCompanyId);
+                Add(cmd, "@userId", useUserScope ? currentUserId : 0);
                 Add(cmd, "@fromDate", fromDate);
                 Add(cmd, "@toDate", toDate);
                 Add(cmd, "@provider", normalizedProvider);
@@ -4325,7 +4360,9 @@ public async Task<IActionResult> MonthlySamplesV2(
 {
     // 1. Resolve Company ID from the st.auth cookie claims securely
     int targetCompanyId = GetTargetCompanyId(company_id);
-    if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User)) 
+    int currentUserId = GetCurrentUserId();
+    bool useUserScope = UseCurrentUserScope(targetCompanyId, currentUserId);
+    if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope) 
 {
     return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
 }
@@ -4343,7 +4380,7 @@ public async Task<IActionResult> MonthlySamplesV2(
     // 2. Build a unique cache key for this specific request
     string fromKey = effectiveFrom.ToString("yyyyMMdd");
     string toKey = effectiveTo.ToString("yyyyMMdd");
-    string cacheKey = $"MonthlySamples:{targetCompanyId}:{fromKey}:{toKey}";
+    string cacheKey = $"MonthlySamples:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{fromKey}:{toKey}";
 
     // 3. Try to fetch data from Redis Cache
     if (_redis != null && _redis.IsConnected)
@@ -4363,7 +4400,7 @@ public async Task<IActionResult> MonthlySamplesV2(
     {
         var monthlyData = new List<(int Year, int Month, int Count)>();
 
-        if (targetCompanyId == 0)
+        if (targetCompanyId == 0 && !useUserScope)
         {
             var rows = await db.tbl_network_log.AsNoTracking()
                 .Where(x => x.timestamp.HasValue
@@ -4383,7 +4420,7 @@ public async Task<IActionResult> MonthlySamplesV2(
                 from l in db.tbl_network_log.AsNoTracking()
                 join s in db.tbl_session.AsNoTracking() on l.session_id equals s.id
                 join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
-                where u.company_id == targetCompanyId
+                where (useUserScope ? s.user_id == currentUserId : u.company_id == targetCompanyId)
                    && l.timestamp.HasValue
                    && l.timestamp.Value >= effectiveFrom
                    && l.timestamp.Value < effectiveTo.AddDays(1)
@@ -4671,7 +4708,9 @@ GROUP BY provider, tech;
             // 1. SMART SECURITY: RESOLVE COMPANY ID
             // =========================================================
             int targetCompanyId = GetTargetCompanyId(company_id);
-if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User)) 
+            int currentUserId = GetCurrentUserId();
+            bool useUserScope = UseCurrentUserScope(targetCompanyId, currentUserId);
+if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope) 
 {
     return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
 }
@@ -4706,7 +4745,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                 ? string.Join(",", netSet.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
                 : "ALL";
 
-            string cacheKey = $"OpSamples:{targetCompanyId}:{opKey}:{netKey}:{fromKey}:{toKey}";
+            string cacheKey = $"OpSamples:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{opKey}:{netKey}:{fromKey}:{toKey}";
 
             // =========================================================
             // 3. TRY REDIS
@@ -4739,7 +4778,9 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                 {
                     cmd.CommandTimeout = 180;
 
-                    var companyClause = targetCompanyId == 0 ? "1=1" : "u.company_id = @companyId";
+                    var companyClause = targetCompanyId == 0 && !useUserScope
+                        ? "1=1"
+                        : (useUserScope ? "s.user_id = @userId" : "u.company_id = @companyId");
                     var sqlBuilder = new StringBuilder(@"
                 SELECT 
                     t.operatorName,
@@ -4843,6 +4884,10 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                     if (targetCompanyId > 0)
                     {
                         var pComp = cmd.CreateParameter(); pComp.ParameterName = "@companyId"; pComp.Value = targetCompanyId; cmd.Parameters.Add(pComp);
+                    }
+                    if (useUserScope)
+                    {
+                        var pUser = cmd.CreateParameter(); pUser.ParameterName = "@userId"; pUser.Value = currentUserId; cmd.Parameters.Add(pUser);
                     }
 
                     var pFrom = cmd.CreateParameter(); pFrom.ParameterName = "@from"; pFrom.Value = (object?)from ?? DBNull.Value; cmd.Parameters.Add(pFrom);
@@ -5439,7 +5484,9 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             // 1. SMART SECURITY: RESOLVE COMPANY ID
             // =========================================================
             int targetCompanyId = GetTargetCompanyId(company_id);
-            if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
+            int currentUserId = GetCurrentUserId();
+            bool useUserScope = UseCurrentUserScope(targetCompanyId, currentUserId);
+            if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope)
             {
                 return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
             }
@@ -5462,7 +5509,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             string fromKey = hasDateFilter ? effectiveFrom.ToString("yyyyMMdd") : "ALL";
             string toKey = hasDateFilter ? effectiveTo.ToString("yyyyMMdd") : "ALL";
 
-            string cacheKey = $"BandDist:{targetCompanyId}:{opKey}:{netKey}:{fromKey}:{toKey}";
+            string cacheKey = $"BandDist:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{opKey}:{netKey}:{fromKey}:{toKey}";
 
             // =========================================================
             // 4. TRY REDIS
@@ -5535,7 +5582,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             ORDER BY count DESC;
             ";
 
-                    if (targetCompanyId == 0)
+                    if (targetCompanyId == 0 && !useUserScope)
                     {
                         cmd.CommandText = string.Format(
                             sqlCore,
@@ -5547,13 +5594,17 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                         cmd.CommandText = string.Format(
                             sqlCore,
                             "JOIN tbl_session s ON n.session_id = s.id JOIN tbl_user u ON s.user_id = u.id",
-                            "u.company_id = @companyId");
+                            useUserScope ? "s.user_id = @userId" : "u.company_id = @companyId");
                     }
 
                     // Parameters
                     if (targetCompanyId > 0)
                     {
                         var pComp = cmd.CreateParameter(); pComp.ParameterName = "@companyId"; pComp.Value = targetCompanyId; cmd.Parameters.Add(pComp);
+                    }
+                    if (useUserScope)
+                    {
+                        var pUser = cmd.CreateParameter(); pUser.ParameterName = "@userId"; pUser.Value = currentUserId; cmd.Parameters.Add(pUser);
                     }
                     var pApplyDate = cmd.CreateParameter(); pApplyDate.ParameterName = "@applyDate"; pApplyDate.Value = hasDateFilter ? 1 : 0; cmd.Parameters.Add(pApplyDate);
                     var pFrom = cmd.CreateParameter(); pFrom.ParameterName = "@from"; pFrom.Value = effectiveFrom; cmd.Parameters.Add(pFrom);
@@ -5610,7 +5661,9 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             // 1. SMART SECURITY: RESOLVE COMPANY ID
             // =========================================================
             int targetCompanyId = GetTargetCompanyId(company_id);
-if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User)) 
+            int currentUserId = GetCurrentUserId();
+            bool useUserScope = UseCurrentUserScope(targetCompanyId, currentUserId);
+if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope) 
 {
     return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
 }
@@ -5626,7 +5679,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             }
             string fromKey = hasDateFilter ? effectiveFrom.ToString("yyyyMMdd") : "ALL";
             string toKey = hasDateFilter ? effectiveTo.ToString("yyyyMMdd") : "ALL";
-            string cacheKey = $"HandsetDist:MakeOnly:{targetCompanyId}:{fromKey}:{toKey}";
+            string cacheKey = $"HandsetDist:MakeOnly:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}:{fromKey}:{toKey}";
 
             // =========================================================
             // 3. TRY REDIS
@@ -5675,13 +5728,19 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
 
                 var sql = string.Format(
                     sqlTemplate,
-                    targetCompanyId == 0 ? "1=1" : "u.company_id = @companyId",
+                    targetCompanyId == 0 && !useUserScope
+                        ? "1=1"
+                        : (useUserScope ? "s.user_id = @userId" : "u.company_id = @companyId"),
                     dateClause);
 
                 var sqlParams = new List<MySqlParameter>();
                 if (targetCompanyId > 0)
                 {
                     sqlParams.Add(new MySqlParameter("@companyId", targetCompanyId));
+                }
+                if (useUserScope)
+                {
+                    sqlParams.Add(new MySqlParameter("@userId", currentUserId));
                 }
 
                 if (hasDateFilter)
@@ -6347,14 +6406,16 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             // 1. SMART SECURITY: RESOLVE COMPANY ID
             // =========================================================
            int targetCompanyId = GetTargetCompanyId(company_id);
+           int currentUserId = GetCurrentUserId();
+           bool useUserScope = UseCurrentUserScope(targetCompanyId, currentUserId);
 
-     if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User)) 
+     if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope) 
 {
     return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
 }
 
     // 2. CACHE KEY
-    string cacheKey = $"OperatorsList:{targetCompanyId}";
+    string cacheKey = $"OperatorsList:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
 
             
             if (_redis != null && _redis.IsConnected)
@@ -6375,7 +6436,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                 var cutoff = DateTime.UtcNow.AddDays(-90);
                 List<string> operators;
 
-                if (targetCompanyId == 0)
+                if (targetCompanyId == 0 && !useUserScope)
                 {
                     operators = await db.tbl_network_log.AsNoTracking()
                         .Where(l => !string.IsNullOrEmpty(l.m_alpha_long)
@@ -6392,7 +6453,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                         from s in db.tbl_session.AsNoTracking()
                         join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
                         join l in db.tbl_network_log.AsNoTracking() on s.id equals l.session_id
-                        where u.company_id == targetCompanyId
+                        where (useUserScope ? s.user_id == currentUserId : u.company_id == targetCompanyId)
                            && !string.IsNullOrEmpty(l.m_alpha_long)
                            && l.timestamp.HasValue
                            && l.timestamp.Value >= cutoff
@@ -6426,13 +6487,15 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
             // 1. SMART SECURITY: RESOLVE COMPANY ID
             // =========================================================
            int targetCompanyId = GetTargetCompanyId(company_id);
+           int currentUserId = GetCurrentUserId();
+           bool useUserScope = UseCurrentUserScope(targetCompanyId, currentUserId);
     
-   if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User)) 
+   if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User) && !useUserScope) 
 {
     return Unauthorized(new { Status = 0, Message = "Unauthorized. Invalid Company." });
 }
     // 2. CACHE KEY
-    string cacheKey = $"NetworksList:{targetCompanyId}";
+    string cacheKey = $"NetworksList:{targetCompanyId}:user:{(useUserScope ? currentUserId : 0)}";
 
            
             if (_redis != null && _redis.IsConnected)
@@ -6453,7 +6516,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                 var cutoff = DateTime.UtcNow.AddDays(-90);
                 List<string> networks;
 
-                if (targetCompanyId == 0)
+                if (targetCompanyId == 0 && !useUserScope)
                 {
                     networks = await db.tbl_network_log.AsNoTracking()
                         .Where(l => !string.IsNullOrEmpty(l.network)
@@ -6470,7 +6533,7 @@ if (targetCompanyId == 0 && !_userScope.IsSuperAdmin(User))
                         from s in db.tbl_session.AsNoTracking()
                         join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
                         join l in db.tbl_network_log.AsNoTracking() on s.id equals l.session_id
-                        where u.company_id == targetCompanyId
+                        where (useUserScope ? s.user_id == currentUserId : u.company_id == targetCompanyId)
                            && !string.IsNullOrEmpty(l.network)
                            && l.timestamp.HasValue
                            && l.timestamp.Value >= cutoff
