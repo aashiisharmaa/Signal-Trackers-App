@@ -91,7 +91,7 @@ namespace SignalTracker.Services
 
     internal static class MySqlConnectionStringHelper
     {
-        public static string EnsureZeroDateTimeHandling(string? connectionString)
+     public static string EnsureZeroDateTimeHandling(string? connectionString)
         {
             if (string.IsNullOrWhiteSpace(connectionString))
                 return string.Empty;
@@ -101,6 +101,21 @@ namespace SignalTracker.Services
                 ["Allow Zero DateTime"] = true,
                 ["Convert Zero DateTime"] = true
             };
+
+            if (builder.MaximumPoolSize <= 0 || builder.MaximumPoolSize > 100)
+            {
+                builder.MaximumPoolSize = 100;
+            }
+
+            if (builder.MinimumPoolSize > 5)
+            {
+                builder.MinimumPoolSize = 5;
+            }
+
+            if (builder.MinimumPoolSize > builder.MaximumPoolSize)
+            {
+                builder.MinimumPoolSize = builder.MaximumPoolSize;
+            }
 
             return builder.ConnectionString;
         }
