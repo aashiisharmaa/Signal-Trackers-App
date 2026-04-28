@@ -110,7 +110,20 @@ namespace SignalTracker.Controllers
                     })
                     .FirstOrDefaultAsync();
 
-                if (user == null)
+                if (user != null)
+                {
+                    var resolvedCountry = (user.country_code ?? string.Empty).Trim().ToUpperInvariant();
+                    if (resolvedCountry == "TW")
+                    {
+                        var twUser = await FindTwUserAsync(model.Email, model.Password);
+                        if (twUser != null)
+                        {
+                            user = twUser;
+                            loginSource = "TW";
+                        }
+                    }
+                }
+                else
                 {
                     user = await FindTwUserAsync(model.Email, model.Password);
                     if (user != null) loginSource = "TW";
@@ -184,7 +197,7 @@ namespace SignalTracker.Controllers
                 {
                     message = "Login successful",
                     country = resolvedCountryCode,
-                    source_db = loginSource,
+                    source_db = resolvedCountryCode,
                     user = new
                     {
                         user.id,

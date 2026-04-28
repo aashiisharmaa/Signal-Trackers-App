@@ -170,7 +170,20 @@ namespace SignalTracker.Controllers
                     user = await GetUserForLogin(_db, emailNormalized);
                     var dbMs = sw.ElapsedMilliseconds;
 
-                    if (user == null || user.password != obj.Password)
+                    if (user != null && user.password == obj.Password)
+                    {
+                        var resolvedCountry = (user.country_code ?? string.Empty).Trim().ToUpperInvariant();
+                        if (resolvedCountry == "TW")
+                        {
+                            var twUser = await GetUserForLoginTw(emailNormalized);
+                            if (twUser != null && twUser.password == obj.Password)
+                            {
+                                user = twUser;
+                                loginSource = "TW";
+                            }
+                        }
+                    }
+                    else
                     {
                         var twUser = await GetUserForLoginTw(emailNormalized);
                         if (twUser == null || twUser.password != obj.Password)
@@ -255,7 +268,7 @@ namespace SignalTracker.Controllers
                         user.country_code,
                         enabled_features = enabledFeatures
                     },
-                    source_db = loginSource,
+                    source_db = resolvedCountryCode,
                     message = "Login successful!"
                 });
             }

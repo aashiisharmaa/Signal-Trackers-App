@@ -18,16 +18,30 @@ namespace SignalTracker.Services
         public const int ROLE_USER = 1;
 
         /// <summary>
-        /// Data access is isolated per authenticated user. Company/global data scopes
-        /// must not be used for dashboard/log/project reads.
+        /// Resolve the effective company scope for the current user.
+        /// Super admins may optionally scope to a requested company; regular users
+        /// are always restricted to their own company.
         /// </summary>
         public int GetTargetCompanyId(ClaimsPrincipal user, int? requestedCompanyId)
         {
-            return 0;
+            if (IsSuperAdmin(user))
+            {
+                // Super admins are global by default. They only scope down when
+                // a specific company is explicitly requested.
+                return requestedCompanyId.GetValueOrDefault(0);
+            }
+
+            return GetCompanyId(user);
         }
         public bool IsSuperAdmin(ClaimsPrincipal user)
         {
-            return false;
+            var userTypeId =
+                GetIntClaim(user, "UserTypeId", "m_user_type_id")
+                ?? _httpContextAccessor.HttpContext?.Session?.GetInt32("UserType")
+                ?? ParseInt(_httpContextAccessor.HttpContext?.Session?.GetString("UserType"))
+                ?? 0;
+
+            return userTypeId == ROLE_SUPER_ADMIN;
         }
 
         public int GetCurrentUserId(ClaimsPrincipal user)
@@ -40,7 +54,10 @@ namespace SignalTracker.Services
 
         internal int GetCompanyId(ClaimsPrincipal user)
         {
-            throw new NotImplementedException();
+            return GetIntClaim(user, "CompanyId", "company_id")
+                ?? _httpContextAccessor.HttpContext?.Session?.GetInt32("CompanyId")
+                ?? ParseInt(_httpContextAccessor.HttpContext?.Session?.GetString("CompanyId"))
+                ?? 0;
         }
 
         private static string? GetStringClaim(ClaimsPrincipal user, params string[] claimTypes)
